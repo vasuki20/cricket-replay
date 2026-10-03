@@ -1,0 +1,17 @@
+:root { color-scheme: light; font-family: system-ui, sans-serif; color: #162b28; background: #eef3f0; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 680px; margin: auto; padding: calc(env(safe-area-inset-top) + 24px) 18px calc(env(safe-area-inset-bottom) + 24px); }
+header { margin-bottom: 24px; }
+.eyebrow { font-size: .75rem; letter-spacing: .12em; font-weight: 700; color: #42695c; }
+h1 { font-size: 2rem; line-height: 1.15; }
+h2 { font-size: 1.1rem; margin-top: 0; }
+p { line-height: 1.5; }
+section { background: white; padding: 20px; border-radius: 14px; margin-bottom: 16px; border: 1px solid #d8e3dd; }
+button { font: inherit; min-height: 48px; padding: 10px 14px; border-radius: 8px; border: 1px solid #446c5e; background: #fff; color: #163e30; margin: 4px 8px 4px 0; }
+button[aria-pressed="true"] { background: #163e30; color: white; }
+button:disabled { opacity: .55; }
+button:focus-visible { outline: 3px solid #d28d16; outline-offset: 3px; }
+dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+dt { font-weight: 600; } dd { margin: 0; overflow-wrap: anywhere; }
+.error { color: #9e2727; }

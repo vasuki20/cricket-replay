@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.angular/
+.DS_Store
+ios/App/App/public/
+ios/App/App/capacitor.config.json
+ios/App/App.xcodeproj/xcuserdata/
+ios/App/App.xcodeproj/project.xcworkspace/xcuserdata/
+android/.gradle/
+android/local.properties
+android/**/build/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+*.log
