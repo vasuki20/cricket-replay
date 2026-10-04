@@ -110,12 +110,15 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus 
       </section>
       <section><h2>Rolling camera recording</h2>
       @if (!recordingSupported) { <p>Camera recording requires an installed Android or iPhone app.</p> } @else {
-        <p>Hold the phone in landscape. Rear camera, no audio; target 1280×720 at 30 fps. Keep this app foreground. Wi-Fi is optional for recording.</p>
+        <p><strong>Turn the phone sideways before starting.</strong> Enable auto-rotate on Android or turn off Portrait Orientation Lock on iPhone. Rear camera, no audio; keep this app on screen.</p>
+        <div id="recording-preview" class="recording-preview"><span>{{ recordingActive() ? 'Live rear camera' : recordingStarting() ? 'Opening rear camera…' : 'Live camera view appears here when you start' }}</span></div>
+        <p aria-live="polite"><strong>{{ recordingStarting() ? 'Starting camera…' : recording()?.state === 'recording' ? '● Recording — live camera active' : recording()?.state === 'stopping' ? 'Stopping recording…' : 'Camera stopped' }}</strong></p>
+        @if (recordingError()) { <p class="error" role="alert">{{ recordingError() }}</p> }
         <label>Retention seconds (30–180)<input type="number" min="30" max="180" step="1" [value]="retentionSeconds()" [disabled]="recordingActive() || recordingBusy()" (input)="retentionSeconds.set(+$any($event.target).value)"></label>
         <label>Review seconds (5–30)<input type="number" min="5" max="30" step="1" [value]="reviewSeconds()" [disabled]="recordingActive() || recordingBusy()" (input)="reviewSeconds.set(+$any($event.target).value)"></label>
         <p>Experiment defaults: 120 / 20 seconds. Review must be at least 10 seconds shorter than retention. Starting a new experiment deletes the previous recording and clip.</p>
         <button [disabled]="recordingActive() || recordingBusy() || networkBusy() || transferBusy()" (click)="recordingAction('start')">Start rear camera</button>
-        <button [disabled]="!recordingActive()" (click)="recordingAction('stop')">Stop recording</button>
+        <button [disabled]="!recordingActive() && !recordingStarting()" (click)="recordingAction('stop')">Stop recording</button>
         <button [disabled]="recording()?.state !== 'recording' || recordingBusy() || (recording()?.elapsedSeconds ?? 0) < reviewSeconds()" (click)="recordingAction('extract')">Extract latest review clip</button>
         <button [disabled]="!recording()?.extraction?.ready || recordingBusy()" (click)="recordingAction('play')">Play recording clip</button>
         <button [disabled]="recordingActive() || recordingBusy()" (click)="recordingAction('cleanup')">Delete recording experiment</button>
@@ -138,7 +141,6 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus 
           </div>
           <details><summary>Recording diagnostics (no footage or paths)</summary><pre>{{ recordingReport() }}</pre></details>
         }
-        @if (recordingError()) { <p class="error" role="alert">{{ recordingError() }}</p> }
         <p>Timestamp intervals above 50 ms flag investigation; they do not prove a visible gap. Inspect a moving subject or timer across clip boundaries. Backgrounding stops capture. Clips stay on this phone.</p>
       }
       </section>
@@ -156,8 +158,10 @@ class App implements OnDestroy {
   readonly recordingSupported = this.networkSupported;
   readonly recording = signal<RecordingStatus | null>(null);
   readonly recordingBusy = signal(false);
+  readonly recordingStarting = signal(false);
   readonly recordingError = signal('');
   readonly fullRecordingReport = signal('');
+  private recordingStartAttempt = 0;
   async readRecordingReport() {
     try { this.fullRecordingReport.set((await Feasibility.recordingReport()).report); }
     catch (error) { this.recordingError.set(error instanceof Error ? error.message : String(error)); }
@@ -170,11 +174,20 @@ class App implements OnDestroy {
     if (this.recordingBusy() && action !== 'stop') return;
     if (action !== 'stop') this.recordingBusy.set(true);
     this.recordingError.set('');
+    const attempt = action === 'start' || action === 'stop' ? ++this.recordingStartAttempt : this.recordingStartAttempt;
     try {
       if (action === 'start') {
         this.fullRecordingReport.set('');
         const retentionSeconds = this.retentionSeconds(), reviewSeconds = this.reviewSeconds();
         if (!Number.isInteger(retentionSeconds) || !Number.isInteger(reviewSeconds) || retentionSeconds < 30 || retentionSeconds > 180 || reviewSeconds < 5 || reviewSeconds > 30 || reviewSeconds > retentionSeconds - 10) throw new Error('Use retention 30–180 and review 5–30 whole seconds; review must be at least 10 seconds shorter.');
+        if (window.innerHeight > window.innerWidth) throw new Error('Turn the phone sideways first. Enable auto-rotate on Android or turn off Portrait Orientation Lock on iPhone.');
+        const permission = await Feasibility.requestCameraPermission();
+        this.diagnostics.set(permission);
+        if (permission.cameraPermission !== 'granted') throw new Error('Camera permission is needed. Allow Camera in the phone’s app settings, then try again.');
+        this.recordingStarting.set(true);
+        document.getElementById('recording-preview')?.scrollIntoView({ block: 'center' });
+        await this.updateRecordingPreview();
+        if (attempt !== this.recordingStartAttempt) return;
         await Feasibility.startRecording({ retentionSeconds, reviewSeconds });
       } else if (action === 'stop') await Feasibility.stopRecording();
       else if (action === 'extract') await Feasibility.extractRecording();
@@ -182,7 +195,27 @@ class App implements OnDestroy {
       else await Feasibility.cleanupRecording();
       this.recording.set(await Feasibility.recordingStatus());
     } catch (error) { this.recordingError.set(error instanceof Error ? error.message : String(error)); }
-    finally { if (action !== 'stop') this.recordingBusy.set(false); }
+    finally {
+      if (action === 'start') this.recordingStarting.set(false);
+      if (action !== 'stop') this.recordingBusy.set(false);
+      try { this.recording.set(await Feasibility.recordingStatus()); await this.updateRecordingPreview(); }
+      catch (error) { if (!this.recordingError()) this.recordingError.set(error instanceof Error ? error.message : String(error)); }
+    }
+  }
+  private previewFrame: number | null = null;
+  private readonly previewLayoutChanged = () => {
+    if (this.previewFrame !== null) return;
+    this.previewFrame = requestAnimationFrame(() => {
+      this.previewFrame = null;
+      void this.updateRecordingPreview().catch(error => this.recordingError.set(error instanceof Error ? error.message : String(error)));
+    });
+  };
+  private async updateRecordingPreview() {
+    if (!this.recordingSupported) return;
+    const rect = document.getElementById('recording-preview')?.getBoundingClientRect();
+    if (!rect) return;
+    await Feasibility.setRecordingPreview({ x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+      viewportWidth: window.innerWidth, visible: this.recordingStarting() || this.recordingActive() });
   }
   readonly secret = signal('');
   readonly port = signal(8765);
@@ -199,8 +232,17 @@ class App implements OnDestroy {
   private qrKey = '';
   private polling = false;
   private readonly timer = this.networkSupported ? setInterval(() => void this.refresh(), 1000) : null;
-  constructor() { if (this.networkSupported) void this.refresh(); }
-  ngOnDestroy() { if (this.timer) clearInterval(this.timer); }
+  constructor() {
+    if (this.networkSupported) void this.refresh();
+    window.addEventListener('scroll', this.previewLayoutChanged, { passive: true });
+    window.addEventListener('resize', this.previewLayoutChanged);
+  }
+  ngOnDestroy() {
+    if (this.timer) clearInterval(this.timer);
+    if (this.previewFrame !== null) cancelAnimationFrame(this.previewFrame);
+    window.removeEventListener('scroll', this.previewLayoutChanged);
+    window.removeEventListener('resize', this.previewLayoutChanged);
+  }
   sessionActive() { return !['stopped', 'failed'].includes(this.session()?.state ?? 'stopped'); }
   private async refresh() {
     if (this.polling) return;
@@ -209,7 +251,7 @@ class App implements OnDestroy {
     catch (error) { this.networkError.set(error instanceof Error ? error.message : String(error)); }
     finally {
       if (this.recordingSupported) {
-        try { this.recording.set(await Feasibility.recordingStatus()); }
+        try { this.recording.set(await Feasibility.recordingStatus()); await this.updateRecordingPreview(); }
         catch (error) { this.recordingError.set(error instanceof Error ? error.message : String(error)); }
       }
       this.polling = false;

@@ -25,3 +25,5 @@ select { width: 100%; min-height: 48px; font: inherit; margin-top: 8px; }
 .pairing-qr { margin: 16px 0; text-align: center; }
 .pairing-qr img { display: block; width: min(100%, 320px); margin: auto; border: 24px solid white; background: white; image-rendering: pixelated; }
 .pairing-qr figcaption { margin-top: 12px; }
+.recording-preview { width: min(100%, 480px); aspect-ratio: 16 / 9; max-height: 40vh; background: #14202c; color: #fff; display: flex; align-items: center; justify-content: center; margin: 12px 0; overflow: hidden; }
+.recording-preview span { padding: 12px; text-align: center; }

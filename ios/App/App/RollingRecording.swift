@@ -13,6 +13,9 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private var config = try! RecordingConfig()
     private var buffer = RecordingBuffer(config: try! RecordingConfig())
     private var capture: AVCaptureSession?
+    #if os(iOS)
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    #endif
     private var device: AVCaptureDevice?
     private var compression: VTCompressionSession?
     private var observers: [NSObjectProtocol] = []
@@ -116,7 +119,8 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     }
 
     #if os(iOS)
-    func start(config options: RecordingConfig, orientation: AVCaptureVideoOrientation, done: @escaping (Error?) -> Void) {
+    func start(config options: RecordingConfig, orientation: AVCaptureVideoOrientation,
+               preview: AVCaptureVideoPreviewLayer? = nil, done: @escaping (Error?) -> Void) {
         queue.async {
             guard !["starting", "recording", "stopping"].contains(self.state), !self.extracting, self.finalizing == 0 else {
                 done(RecordingError.invalid("Stop recording and finish extraction/finalization first")); return
@@ -144,6 +148,14 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                 capture.sessionPreset = .inputPriority
                 let cameraInput = try AVCaptureDeviceInput(device: device)
                 guard capture.canAddInput(cameraInput) else { throw RecordingError.invalid("Cannot add rear camera input") }; capture.addInput(cameraInput)
+                self.previewLayer = preview
+                preview?.session = capture
+                if let previewConnection = preview?.connection, previewConnection.isVideoOrientationSupported {
+                    previewConnection.videoOrientation = orientation
+                    if previewConnection.isVideoMirroringSupported {
+                        previewConnection.automaticallyAdjustsVideoMirroring = false; previewConnection.isVideoMirrored = false
+                    }
+                }
                 try device.lockForConfiguration()
                 device.activeFormat = format
                 device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: fps)
@@ -361,7 +373,7 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         state = "stopping"; detail = reason
         if pendingEnd != nil { extractionFailed(RecordingError.invalid("Recording stopped before extraction sealed")) }
         startDone?(RecordingError.invalid(reason)); startDone = nil
-        capture?.stopRunning(); removeObservers(); capture = nil; device = nil; timer?.cancel(); timer = nil
+        capture?.stopRunning(); detachPreview(); removeObservers(); capture = nil; device = nil; timer?.cancel(); timer = nil
         if let compression {
             let result = VTCompressionSessionCompleteFrames(compression, untilPresentationTimeStamp: .invalid)
             if result != noErr { fail(RecordingError.invalid("Cannot drain encoder (\(result))")); return }
@@ -380,7 +392,7 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     }
     private func fail(_ error: Error) {
         state = "failed"; detail = error.localizedDescription; stopped = ProcessInfo.processInfo.systemUptime
-        run += 1; capture?.stopRunning(); capture = nil; device = nil; removeObservers(); timer?.cancel(); timer = nil
+        run += 1; capture?.stopRunning(); detachPreview(); capture = nil; device = nil; removeObservers(); timer?.cancel(); timer = nil
         releaseEncoder(); writer?.cancelWriting(); writer = nil; input = nil; active = nil
         for closing in closingWriters.values where closing.status == .writing { closing.cancelWriting() }; closingWriters = [:]
         try? framesCSV?.close(); framesCSV = nil; finalizing = 0; inFlight = 0
@@ -389,6 +401,11 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         let completions = stopDone; stopDone = []; completions.forEach { $0() }
     }
     private func releaseEncoder() { if let compression { VTCompressionSessionInvalidate(compression) }; compression = nil }
+    private func detachPreview() {
+        #if os(iOS)
+        previewLayer?.session = nil; previewLayer = nil
+        #endif
+    }
     private func removeObservers() { observers.forEach { NotificationCenter.default.removeObserver($0) }; observers = [] }
     private func watchdog(_ current: Int) {
         let timer = DispatchSource.makeTimerSource(queue: queue); self.timer = timer

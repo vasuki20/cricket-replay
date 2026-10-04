@@ -33,6 +33,7 @@ internal class RollingRecording(private val context: Context, private val captur
     private var session: CameraCaptureSession? = null
     private var codec: MediaCodec? = null
     private var surface: Surface? = null
+    private var preview: Surface? = null // UI owns this surface; recorder never releases it.
     private var format: MediaFormat? = null
     private var muxer: MediaMuxer? = null
     private var segmentFile: File? = null
@@ -103,7 +104,8 @@ internal class RollingRecording(private val context: Context, private val captur
     }
     private var epochMs = 0L
 
-    fun start(options: RecordingConfig, displayRotation: Int, done: (Exception?) -> Unit) { handler.post {
+    fun start(options: RecordingConfig, displayRotation: Int, previewSurface: Surface? = null,
+              configurePreview: ((Int, Int, Int) -> Unit)? = null, done: (Exception?) -> Unit) { handler.post {
         if (state in listOf("starting", "recording", "stopping") || extracting) { done(IllegalStateException("Stop recording and finish extraction first")); return@post }
         try {
             check(!destroyed) { "Recording engine closed" }
@@ -144,6 +146,15 @@ internal class RollingRecording(private val context: Context, private val captur
             val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
             rotation = (sensorOrientation - displayRotation + 360) % 360
             check(rotation == 0 || rotation == 180) { "Hold the phone in landscape before starting" }
+            preview = previewSurface
+            if (preview != null) {
+                val previewSizes = map.getOutputSizes(android.graphics.SurfaceTexture::class.java)?.toList().orEmpty()
+                val previewSize = previewSizes.firstOrNull { it == size }
+                    ?: previewSizes.filter { it.width <= 1280 && it.height <= 720 }
+                        .sortedByDescending { it.width * it.height }.firstOrNull()
+                    ?: error("No supported camera preview size")
+                configurePreview?.invoke(previewSize.width, previewSize.height, rotation)
+            }
             selection = JSONObject().put("camera", "rear").put("width", size.width).put("height", size.height)
                 .put("requestedFps", range.upper).put("aeRange", "${range.lower}–${range.upper}").put("encoder", encoder)
                 .put("rotationDegrees", rotation).put("sensorTimestampSource", chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE))
@@ -209,13 +220,14 @@ internal class RollingRecording(private val context: Context, private val captur
                 if (run != generation || state != "starting") { device.close(); return }
                 camera = device
                 try {
-                    device.createCaptureSession(listOf(checkNotNull(surface)), object : CameraCaptureSession.StateCallback() {
+                    device.createCaptureSession(listOfNotNull(checkNotNull(surface), preview), object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(capture: CameraCaptureSession) {
                             if (run != generation || state != "starting") { capture.close(); return }
                             session = capture
                             try {
                                 val request = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                                     addTarget(checkNotNull(surface)); set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+                                    preview?.let { addTarget(it) }
                                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                                 }.build()
                                 capture.setRepeatingRequest(request, object : CameraCaptureSession.CaptureCallback() {
@@ -356,7 +368,7 @@ internal class RollingRecording(private val context: Context, private val captur
     private fun releaseCapture() {
         generation++; runCatching { session?.close() }; session = null; runCatching { camera?.close() }; camera = null
         runCatching { codec?.stop() }; runCatching { codec?.release() }; codec = null
-        surface?.release(); surface = null; format = null
+        surface?.release(); surface = null; preview = null; format = null
     }
     private fun fail(message: String, error: Exception = IllegalStateException(message)) {
         android.util.Log.e("RollingRecording", message)

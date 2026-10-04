@@ -10,6 +10,8 @@ export interface TransferStatus {
 export interface SampleStatus { ready: boolean; bytes?: number; sha256?: string; durationSeconds?: number; }
 // Shared experiment contract for Android #11 and iOS #12. Paths/footage stay native.
 export interface RecordingConfig { retentionSeconds: number; reviewSeconds: number; }
+// CSS viewport coordinates. Native preview stays attached while hidden/offscreen; no capture restart.
+export interface RecordingPreviewBounds { x: number; y: number; width: number; height: number; viewportWidth: number; visible: boolean; }
 export interface RecordingClipStatus {
   state: string; ready: boolean; detail?: string; bytes?: number; durationSeconds?: number;
   frames?: number; effectiveFps?: number; segments?: number; leadInSeconds?: number;
@@ -36,6 +38,7 @@ export interface SessionStatus {
 export const Feasibility = registerPlugin<{
   recordingStatus(): Promise<RecordingStatus>;
   recordingReport(): Promise<{ report: string }>;
+  setRecordingPreview(options: RecordingPreviewBounds): Promise<void>;
   startRecording(options: RecordingConfig): Promise<void>;
   stopRecording(): Promise<void>;
   extractRecording(): Promise<void>;

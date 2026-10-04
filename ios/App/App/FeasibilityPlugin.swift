@@ -8,6 +8,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "FeasibilityPlugin"
     public let jsName = "Feasibility"
     public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "setRecordingPreview", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "recordingStatus", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "recordingReport", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "startRecording", returnType: CAPPluginReturnPromise),
@@ -41,6 +42,32 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     private let recording = RollingRecording()
     private var cameraRecording = false
     private var previousIdleTimer: Bool?
+    private var recordingPreview: RecordingPreviewView?
+    private var recordingPreviewContainer: UIView?
+    @objc func setRecordingPreview(_ call: CAPPluginCall) { DispatchQueue.main.async {
+        let visible = call.getBool("visible") ?? false
+        if !visible && self.recordingPreview == nil { call.resolve(); return }
+        guard let web = self.bridge?.webView, let parent = web.superview,
+              let x = call.getDouble("x"), let y = call.getDouble("y"), let width = call.getDouble("width"),
+              let height = call.getDouble("height"), let viewport = call.getDouble("viewportWidth"),
+              [x, y, width, height, viewport].allSatisfy({ $0.isFinite }), width > 0, height > 0, viewport > 0 else {
+            call.reject("Invalid camera preview bounds"); return
+        }
+        let preview = self.recordingPreview ?? RecordingPreviewView()
+        let container = self.recordingPreviewContainer ?? UIView()
+        container.frame = web.frame; container.clipsToBounds = true; container.isUserInteractionEnabled = false
+        if self.recordingPreview == nil {
+            parent.addSubview(container); container.addSubview(preview)
+            self.recordingPreview = preview; self.recordingPreviewContainer = container
+        }
+        let scale = web.bounds.width / CGFloat(viewport)
+        let frame = web.convert(CGRect(x: CGFloat(x) * scale, y: CGFloat(y) * scale,
+                                      width: CGFloat(width) * scale, height: CGFloat(height) * scale), to: container)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        preview.frame = frame; preview.isHidden = !visible
+        CATransaction.commit()
+        call.resolve()
+    } }
 
     @objc func recordingStatus(_ call: CAPPluginCall) { recording.status { call.resolve($0) } }
     @objc func recordingReport(_ call: CAPPluginCall) { recording.report { result in
@@ -66,7 +93,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
             self.cameraRecording = true; self.previousIdleTimer = UIApplication.shared.isIdleTimerDisabled
             UIApplication.shared.isIdleTimerDisabled = true
             let orientation: AVCaptureVideoOrientation = scene.interfaceOrientation == .landscapeLeft ? .landscapeLeft : .landscapeRight
-            self.recording.start(config: config, orientation: orientation) { error in
+            self.recording.start(config: config, orientation: orientation, preview: self.recordingPreview?.previewLayer) { error in
                 if let error { DispatchQueue.main.async { self.restoreRecordingScreen() }; call.reject(error.localizedDescription) }
                 else { call.resolve() }
             }
@@ -94,6 +121,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     } }
     private func restoreRecordingScreen() {
         cameraRecording = false
+        recordingPreview?.isHidden = true
         if let previousIdleTimer { UIApplication.shared.isIdleTimerDisabled = previousIdleTimer }; previousIdleTimer = nil
     }
 
@@ -252,6 +280,17 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
             DispatchQueue.main.async { call.resolve(self.diagnostics()) }
         }
     }
+}
+
+private final class RecordingPreviewView: UIView {
+    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
+    var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+    init() {
+        super.init(frame: .zero)
+        isUserInteractionEnabled = false; clipsToBounds = true; backgroundColor = .black
+        previewLayer.videoGravity = .resizeAspect
+    }
+    required init?(coder: NSCoder) { fatalError("Use init()") }
 }
 
 @objc(FeasibilityViewController)

@@ -31,9 +31,11 @@ import org.json.JSONObject
     Permission(alias = "camera", strings = [Manifest.permission.CAMERA])
 ])
 class FeasibilityPlugin : Plugin() {
+    private val recordingPreview by lazy { RecordingPreview(activity, bridge.webView) }
+    @PluginMethod fun setRecordingPreview(call: PluginCall) { activity.runOnUiThread { recordingPreview.layout(call) } }
     private var cameraRecording = false // UI thread owns scanner/generator/camera resource exclusion.
     private val recording by lazy { RollingRecording(context) {
-        activity.runOnUiThread { cameraRecording = false; activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+        activity.runOnUiThread { cameraRecording = false; recordingPreview.hide(); activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     } }
     @PluginMethod fun recordingStatus(call: PluginCall) { recording.status { call.resolve(JSObject(it.toString())) } }
     @PluginMethod fun recordingReport(call: PluginCall) { recording.report { call.resolve(JSObject().put("report", it)) } }
@@ -51,8 +53,9 @@ class FeasibilityPlugin : Plugin() {
                 android.view.Surface.ROTATION_90 -> 90; android.view.Surface.ROTATION_180 -> 180
                 android.view.Surface.ROTATION_270 -> 270; else -> 0
             }
+            val previewSurface = recordingPreview.output() ?: error("Live camera preview is not ready; try again")
             cameraRecording = true; activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            recording.start(config, rotation) { error ->
+            recording.start(config, rotation, previewSurface, recordingPreview::configure) { error ->
                 if (error == null) call.resolve() else { activity.runOnUiThread { cameraRecording = false; activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }; call.reject(error.message ?: "Cannot start recording") }
             }
         } catch (error: Exception) { call.reject(error.message ?: "Invalid recording configuration") }
@@ -214,7 +217,7 @@ class FeasibilityPlugin : Plugin() {
         activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         player?.dismiss(); session.stop("App backgrounded; foreground and restart/reconnect")
     }
-    override fun handleOnDestroy() { destroyed = true; recording.destroy(); player?.dismiss(); session.destroy(); generator.shutdownNow() }
+    override fun handleOnDestroy() { destroyed = true; recording.destroy(); recordingPreview.destroy(); player?.dismiss(); session.destroy(); generator.shutdownNow() }
     private fun diagnostics(): JSObject = JSObject().apply {
         put("platform", "android")
         put("appVersion", context.packageManager.getPackageInfo(context.packageName, 0).versionName)
