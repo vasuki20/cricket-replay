@@ -31,6 +31,51 @@ import org.json.JSONObject
     Permission(alias = "camera", strings = [Manifest.permission.CAMERA])
 ])
 class FeasibilityPlugin : Plugin() {
+    private var cameraRecording = false // UI thread owns scanner/generator/camera resource exclusion.
+    private val recording by lazy { RollingRecording(context) {
+        activity.runOnUiThread { cameraRecording = false; activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    } }
+    @PluginMethod fun recordingStatus(call: PluginCall) { recording.status { call.resolve(JSObject(it.toString())) } }
+    @PluginMethod fun recordingReport(call: PluginCall) { recording.report { call.resolve(JSObject().put("report", it)) } }
+    @PluginMethod fun startRecording(call: PluginCall) { activity.runOnUiThread {
+        if (cameraRecording || scanning || player != null || generating) { call.reject("Stop capture, close scanning/playback and finish sample generation first"); return@runOnUiThread }
+        if (getPermissionState("camera") != PermissionState.GRANTED) {
+            call.reject("Camera access denied or not requested. Request camera permission, or enable Camera in app settings."); return@runOnUiThread
+        }
+        try {
+            // Reject fractional/absent/incorrectly typed configuration rather than silently truncating it.
+            val retention = call.data.get("retentionSeconds") as? Int ?: error("Retention must be an integer")
+            val review = call.data.get("reviewSeconds") as? Int ?: error("Review must be an integer")
+            val config = RecordingConfig(retention, review)
+            @Suppress("DEPRECATION") val rotation = when (activity.windowManager.defaultDisplay.rotation) {
+                android.view.Surface.ROTATION_90 -> 90; android.view.Surface.ROTATION_180 -> 180
+                android.view.Surface.ROTATION_270 -> 270; else -> 0
+            }
+            cameraRecording = true; activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            recording.start(config, rotation) { error ->
+                if (error == null) call.resolve() else { activity.runOnUiThread { cameraRecording = false; activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }; call.reject(error.message ?: "Cannot start recording") }
+            }
+        } catch (error: Exception) { call.reject(error.message ?: "Invalid recording configuration") }
+    } }
+    @PluginMethod fun stopRecording(call: PluginCall) { recording.stop { activity.runOnUiThread {
+        activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); call.resolve()
+    } } }
+    @PluginMethod fun extractRecording(call: PluginCall) { activity.runOnUiThread {
+        if (player != null) { call.reject("Close playback before replacing the clip"); return@runOnUiThread }
+        recording.extract { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Cannot extract recent clip") }
+    } }
+    @PluginMethod fun playRecordingClip(call: PluginCall) {
+        recording.completedClip { file -> activity.runOnUiThread {
+            if (file == null) { call.reject("No completed recording clip"); return@runOnUiThread }
+            if (player != null || activity.isFinishing || activity.isDestroyed) { call.reject("Close playback first"); return@runOnUiThread }
+            try { player = SamplePlayer(activity, file, { error -> if (error == null) call.resolve() else call.reject(error) }, { player = null }) }
+            catch (_: Exception) { player = null; call.reject("Cannot open recording playback") }
+        } }
+    }
+    @PluginMethod fun cleanupRecording(call: PluginCall) { activity.runOnUiThread {
+        if (player != null) { call.reject("Close playback before cleanup"); return@runOnUiThread }
+        recording.cleanup { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Cannot clean recording") }
+    } }
     private val session by lazy { LocalSession(::localAddresses, ::bindWiFi, java.io.File(context.cacheDir, "cricket-transfer-${java.util.UUID.randomUUID()}")) }
     private var scanning = false
     private fun localAddresses(): List<String> = NetworkInterface.getNetworkInterfaces().toList()
@@ -83,6 +128,7 @@ class FeasibilityPlugin : Plugin() {
     }
     @PluginMethod fun scanPairingQR(call: PluginCall) {
         activity.runOnUiThread {
+            if (cameraRecording) { call.reject("Stop recording before opening the QR camera"); return@runOnUiThread }
             if (scanning) { call.reject("Scanner already open"); return@runOnUiThread }
             scanning = true
             if (getPermissionState("camera") == PermissionState.GRANTED) openScanner(call)
@@ -118,6 +164,7 @@ class FeasibilityPlugin : Plugin() {
     private val generator = java.util.concurrent.Executors.newSingleThreadExecutor()
     @PluginMethod fun sampleStatus(call: PluginCall) { activity.runOnUiThread { call.resolve(sampleInfo) } }
     @PluginMethod fun generateSample(call: PluginCall) { activity.runOnUiThread {
+        if (cameraRecording) { call.reject("Stop recording before synthetic generation"); return@runOnUiThread }
         if (generating) { call.reject("Already generating"); return@runOnUiThread }
         if (sampleFile != null) { call.resolve(sampleInfo); return@runOnUiThread }
         generating = true
@@ -163,9 +210,11 @@ class FeasibilityPlugin : Plugin() {
         } }
     } }
     override fun handleOnStop() {
+        recording.stop("App backgrounded; recording stopped. Foreground and start a new experiment.")
+        activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         player?.dismiss(); session.stop("App backgrounded; foreground and restart/reconnect")
     }
-    override fun handleOnDestroy() { destroyed = true; player?.dismiss(); session.destroy(); generator.shutdownNow() }
+    override fun handleOnDestroy() { destroyed = true; recording.destroy(); player?.dismiss(); session.destroy(); generator.shutdownNow() }
     private fun diagnostics(): JSObject = JSObject().apply {
         put("platform", "android")
         put("appVersion", context.packageManager.getPackageInfo(context.packageName, 0).versionName)
