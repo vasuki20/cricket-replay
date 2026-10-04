@@ -1,0 +1,38 @@
+[
+  {
+    "encrypted" : "iUUiKPi8dc2dj8LEKSFbsJxtVGN0aQ53vz9ogMwMcMlrlN8e7FrsiYrxqLqwPOceevM0A0c4uglMIu8ntRcrOnv8a+k\/cO9o0M1O8w==",
+    "hello" : {
+      "nonce" : "9b8e7e1a-0a34-4d58-972b-a21f7508c712",
+      "protocol" : 2,
+      "role" : "host",
+      "type" : "hello"
+    },
+    "id" : "11111111-2222-3333-4444-555555555555",
+    "nonce" : "bbf46558-be12-45b6-aadd-7417f5d692c0",
+    "packet" : {
+      "data" : "AAECA\/8=",
+      "kind" : "chunk",
+      "offset" : 128
+    },
+    "role" : "camera",
+    "secret" : "00112233445566778899aabbccddeeff00"
+  },
+  {
+    "encrypted" : "pBiixBwzDxKCeiK7NpsJtMkLMMqZseOmFwu1oMwIrMOC9fLz7\/lmwFHlik99gZ+otF46nTKml93csc2Fz4+togORfiya2GqhyUkBRw==",
+    "hello" : {
+      "nonce" : "bbf46558-be12-45b6-aadd-7417f5d692c0",
+      "protocol" : 2,
+      "role" : "camera",
+      "type" : "hello"
+    },
+    "id" : "11111111-2222-3333-4444-555555555555",
+    "nonce" : "9b8e7e1a-0a34-4d58-972b-a21f7508c712",
+    "packet" : {
+      "data" : "AAECA\/8=",
+      "kind" : "chunk",
+      "offset" : 128
+    },
+    "role" : "host",
+    "secret" : "00112233445566778899aabbccddeeff00"
+  }
+]

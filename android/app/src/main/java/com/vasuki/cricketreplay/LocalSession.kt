@@ -3,6 +3,8 @@ package com.aadhinitinytales.cricketreplay
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.BufferedInputStream
+import java.io.File
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -14,7 +16,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 // Serial state owner; blocking accept/read/write never run on the UI/state thread.
-internal class LocalSession(private val addresses: () -> List<String>, private val bindCamera: (Socket) -> Unit) {
+internal class LocalSession(private val addresses: () -> List<String>, private val bindCamera: (Socket) -> Unit, directory: File) {
     private val queue = Executors.newSingleThreadScheduledExecutor()
     private val writer = ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, ArrayBlockingQueue<Runnable>(32))
     private var listener: ServerSocket? = null
@@ -23,17 +25,37 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
     private var secret = ""
     private var role = "host"
     private var handshake = "hello"
-    private var authenticated = false
+    @Volatile private var authenticated = false
     private var handshakeTimeout: ScheduledFuture<*>? = null
     private val pending = mutableMapOf<String, Pair<Long, ScheduledFuture<*>>>()
     private var snapshot = emptySnapshot()
+    private val transfer = SampleTransfer(queue, directory).apply {
+        onSend = { id, packet ->
+            try {
+                check(authenticated) { "Peer disconnected" }
+                val authentication = checkNotNull(auth)
+                send(authentication.signed("transfer", id, authentication.encrypt(packet, id)))
+            } catch (error: Exception) { failPeer(error.message ?: "Cannot encrypt transfer") }
+        }
+        onFailure = { failPeer(it) }
+    }
     private fun post(task: () -> Unit) { runCatching { queue.execute(task) } }
     private fun emptySnapshot() = JSONObject().put("state", "stopped").put("detail", "No session").put("role", role)
         .put("authenticated", false).put("addresses", JSONArray()).put("pingsReceived", 0).put("repliesReceived", 0)
     private fun publish(state: String, detail: String) {
         snapshot.put("state", state).put("detail", detail).put("role", role).put("authenticated", authenticated)
     }
-    fun status(done: (JSONObject) -> Unit) { queue.execute { done(JSONObject(snapshot.toString())) } }
+    fun status(done: (JSONObject) -> Unit) { queue.execute { snapshot.put("transfer", transfer.state); done(JSONObject(snapshot.toString())) } }
+    fun sendSample(file: File, slow: Boolean, done: (Exception?) -> Unit) { queue.execute {
+        try {
+            check(role == "camera" && authenticated) { "Connect camera to host first" }
+            transfer.begin(file, slow); done(null)
+        } catch (error: Exception) { done(error) }
+    } }
+    fun completedSample(done: (File?) -> Unit) { queue.execute { done(transfer.completed) } }
+    fun cleanupTransfer(done: (Exception?) -> Unit) { queue.execute {
+        try { transfer.cleanup(); done(null) } catch (error: Exception) { done(error) }
+    } }
     fun startHost(secret: String, port: Int, done: (Exception?) -> Unit) { queue.execute {
         reset(); role = "host"; this.secret = secret
         try {
@@ -77,15 +99,18 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
         publish("authenticating", "Checking session secret"); send(auth!!.hello())
         Thread({
             try {
-                val input = peer.getInputStream(); val line = ByteArrayOutputStream()
+                val input = BufferedInputStream(peer.getInputStream(), 65536); val line = ByteArrayOutputStream()
                 while (!peer.isClosed) {
                     val byte = input.read(); if (byte == -1) error("Peer disconnected")
                     if (byte == 10) {
-                        val frame = JSONObject(line.toString("UTF-8")); line.reset()
+                        val size = line.size(); val frame = JSONObject(line.toString("UTF-8")); line.reset()
                         // Wait for processing: bounded reader backlog, ordered frames.
-                        queue.submit { if (socket === peer) handle(frame) }.get()
+                        queue.submit { if (socket === peer) {
+                            if (size > 2048 && !(authenticated && frame.optString("type") == "transfer")) failPeer("Oversized diagnostic message")
+                            else handle(frame)
+                        } }.get()
                     } else {
-                        line.write(byte); require(line.size() <= 2048) { "Oversized diagnostic message" }
+                        line.write(byte); require(line.size() <= if (authenticated) 65536 else 2048) { "Oversized message" }
                     }
                 }
             } catch (error: Exception) { post { if (socket === peer) failPeer(error.message ?: "Peer disconnected") } }
@@ -132,7 +157,7 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
                         .put("repliesReceived", snapshot.getInt("repliesReceived") + 1)
                     publish("connected", "Received authenticated $type")
                 }
-                "transfer" -> error("Android video transfer is not implemented yet; this task supports ping/status only")
+                "transfer" -> transfer.receive(id, authentication.decrypt(frame.getString("payload"), id), role == "host")
                 else -> error("Unexpected handshake message")
             }
         } catch (error: Exception) { failPeer(error.message ?: "Invalid message") }
@@ -144,6 +169,7 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
         pending[id] = Pair(System.nanoTime(), timeout); signed(if (status) "status" else "ping", id); done(true)
     } }
     private fun failPeer(detail: String) {
+        transfer.cancel(detail)
         handshakeTimeout?.cancel(false); handshakeTimeout = null
         runCatching { socket?.close() }; socket = null; auth = null; authenticated = false
         pending.values.forEach { it.second.cancel(false) }; pending.clear(); writer.queue.clear()

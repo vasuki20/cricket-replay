@@ -82,7 +82,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus } from './native'
         <p>Status messages are authenticated; sample video packets are encrypted. Backgrounding stops the session; restart after returning.</p>
       </section>
       <section><h2>Sample video transfer</h2>
-        @if (!transferSupported) { <p>Android pairing is available. Video transfer is pending the next Android task.</p> } @else {
+        @if (!transferSupported) { <p>Video transfer requires the installed Android or iPhone app.</p> } @else {
         <p>Generate a synthetic 20-second MP4 on the camera phone, send it, then play the verified file on the host.</p>
         @if (role() === 'camera') {
           <button [disabled]="!networkSupported || transferBusy() || transferActive()" (click)="sampleAction('generate')">Generate 20-second sample</button>
@@ -122,7 +122,7 @@ class App implements OnDestroy {
   readonly diagnostics = signal<Diagnostics | null>(null);
   readonly error = signal('');
   readonly networkSupported = this.native && ['ios', 'android'].includes(this.runtime);
-  readonly transferSupported = this.native && this.runtime === 'ios';
+  readonly transferSupported = this.networkSupported;
   readonly secret = signal('');
   readonly port = signal(8765);
   readonly address = signal('');

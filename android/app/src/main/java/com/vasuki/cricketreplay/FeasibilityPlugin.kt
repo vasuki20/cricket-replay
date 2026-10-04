@@ -31,7 +31,7 @@ import org.json.JSONObject
     Permission(alias = "camera", strings = [Manifest.permission.CAMERA])
 ])
 class FeasibilityPlugin : Plugin() {
-    private val session by lazy { LocalSession(::localAddresses, ::bindWiFi) }
+    private val session by lazy { LocalSession(::localAddresses, ::bindWiFi, java.io.File(context.cacheDir, "cricket-transfer-${java.util.UUID.randomUUID()}")) }
     private var scanning = false
     private fun localAddresses(): List<String> = NetworkInterface.getNetworkInterfaces().toList()
         .filter { it.isUp && !it.isLoopback && (it.name.startsWith("wlan") || it.name.startsWith("ap") || it.name.startsWith("swlan") || it.name.startsWith("wifi")) }
@@ -110,14 +110,62 @@ class FeasibilityPlugin : Plugin() {
         if (code == null) call.reject("Not a valid Replay host QR; scan the host's code")
         else call.resolve(JSObject(code.result().toString()))
     }
-    // Connection milestone only. Keep transfer controls disabled until the next Android task.
-    @PluginMethod fun sampleStatus(call: PluginCall) { call.resolve(JSObject().put("ready", false)) }
-    @PluginMethod fun generateSample(call: PluginCall) { call.unimplemented("Android sample transfer is pending") }
-    @PluginMethod fun sendSample(call: PluginCall) { call.unimplemented("Android sample transfer is pending") }
-    @PluginMethod fun playReceivedSample(call: PluginCall) { call.unimplemented("Android sample transfer is pending") }
-    @PluginMethod fun cleanupSamples(call: PluginCall) { call.unimplemented("Android sample transfer is pending") }
-    override fun handleOnStop() { session.stop("App backgrounded; foreground and restart/reconnect") }
-    override fun handleOnDestroy() { session.destroy() }
+    private var sampleFile: java.io.File? = null
+    private var sampleInfo = JSObject().put("ready", false)
+    private var generating = false
+    private var player: SamplePlayer? = null
+    private var destroyed = false
+    private val generator = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @PluginMethod fun sampleStatus(call: PluginCall) { activity.runOnUiThread { call.resolve(sampleInfo) } }
+    @PluginMethod fun generateSample(call: PluginCall) { activity.runOnUiThread {
+        if (generating) { call.reject("Already generating"); return@runOnUiThread }
+        if (sampleFile != null) { call.resolve(sampleInfo); return@runOnUiThread }
+        generating = true
+        generator.execute {
+            var file: java.io.File? = null
+            try {
+                val generated = SampleVideo.generate(context.cacheDir); file = generated
+                val info = JSObject().put("ready", true).put("bytes", generated.length())
+                    .put("sha256", SampleTransfer.checksum(generated)).put("durationSeconds", 20)
+                activity.runOnUiThread {
+                    generating = false
+                    if (destroyed) { generated.delete(); call.reject("App closed during generation") }
+                    else { sampleFile = generated; sampleInfo = info; call.resolve(info) }
+                }
+            } catch (error: Exception) {
+                file?.delete(); activity.runOnUiThread { generating = false; call.reject(error.message ?: "Cannot generate sample") }
+            }
+        }
+    } }
+    @PluginMethod fun sendSample(call: PluginCall) { activity.runOnUiThread {
+        val file = sampleFile
+        if (file == null) { call.reject("Generate the sample first"); return@runOnUiThread }
+        session.sendSample(file, call.getBoolean("slow") ?: false) { error ->
+            if (error == null) call.resolve() else call.reject(error.message ?: "Cannot send sample")
+        }
+    } }
+    @PluginMethod fun playReceivedSample(call: PluginCall) {
+        session.completedSample { file -> activity.runOnUiThread {
+            if (file == null) { call.reject("No complete, checksum-verified sample"); return@runOnUiThread }
+            if (player != null || activity.isFinishing || activity.isDestroyed) { call.reject("Close playback and return to the app first"); return@runOnUiThread }
+            try {
+                player = SamplePlayer(activity, file, { error -> if (error == null) call.resolve() else call.reject(error) }, { player = null })
+            } catch (_: Exception) { player = null; call.reject("Cannot open native playback") }
+        } }
+    }
+    @PluginMethod fun cleanupSamples(call: PluginCall) { activity.runOnUiThread {
+        if (generating || player != null) { call.reject("Finish generation/playback before cleanup"); return@runOnUiThread }
+        session.cleanupTransfer { error -> activity.runOnUiThread {
+            if (error != null) { call.reject(error.message ?: "Cannot clean samples"); return@runOnUiThread }
+            val file = sampleFile
+            if (file != null && file.exists() && !file.delete()) { call.reject("Cannot remove generated sample"); return@runOnUiThread }
+            sampleFile = null; sampleInfo = JSObject().put("ready", false); call.resolve()
+        } }
+    } }
+    override fun handleOnStop() {
+        player?.dismiss(); session.stop("App backgrounded; foreground and restart/reconnect")
+    }
+    override fun handleOnDestroy() { destroyed = true; player?.dismiss(); session.destroy(); generator.shutdownNow() }
     private fun diagnostics(): JSObject = JSObject().apply {
         put("platform", "android")
         put("appVersion", context.packageManager.getPackageInfo(context.packageName, 0).versionName)

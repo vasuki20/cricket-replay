@@ -7,6 +7,7 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
@@ -68,8 +69,8 @@ class ConnectivityTest {
             .flatMap { it.inetAddresses.toList().filterIsInstance<Inet4Address>() }
             .mapNotNull { it.hostAddress }.firstOrNull(PairingCode::validAddress)
         assertNotNull("Join Wi-Fi before this on-device test", address)
-        val host = LocalSession({ listOf("wlan0: $address") }, {})
-        val camera = LocalSession({ listOf("wlan0: $address") }, {})
+        val host = LocalSession({ listOf("wlan0: $address") }, {}, File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "connect-test-${UUID.randomUUID()}"))
+        val camera = LocalSession({ listOf("wlan0: $address") }, {}, File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "connect-test-${UUID.randomUUID()}"))
         val port = ServerSocket(0).use { it.localPort }
         val secret = PairingCode.newSecret()
         try {
@@ -81,6 +82,46 @@ class ConnectivityTest {
             host.ping(false) { assertTrue(it) }; camera.ping(true) { assertTrue(it) }
             waitFor("Bidirectional ping/status") { snapshot(host).optInt("repliesReceived") == 1 && snapshot(camera).optInt("repliesReceived") == 1 }
             assertTrue(snapshot(host).getDouble("lastRoundTripMs") >= 0)
+            val source = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "transfer-test-${UUID.randomUUID()}")
+            val bytes = ByteArray(100_000) { (it % 251).toByte() }; source.writeBytes(bytes)
+            fun transfer(peer: LocalSession) = snapshot(peer).getJSONObject("transfer")
+            fun send(slow: Boolean = false) {
+                val done = CountDownLatch(1); var sendError: Exception? = null
+                camera.sendSample(source, slow) { sendError = it; done.countDown() }
+                assertTrue(done.await(2, TimeUnit.SECONDS)); assertNull(sendError)
+            }
+            fun checkCompleted() {
+                val done = CountDownLatch(1); var received: File? = null
+                host.completedSample { received = it; done.countDown() }
+                assertTrue(done.await(2, TimeUnit.SECONDS)); assertNotNull(received)
+                assertArrayEquals(bytes, received!!.readBytes())
+            }
+            try {
+                for (attempt in 1..3) {
+                    send()
+                    waitFor("Encrypted transfer completes") { transfer(host).optString("state") == "ready" && transfer(camera).optString("state") == "complete" }
+                    assertTrue(transfer(host).getBoolean("checksumVerified"))
+                    assertEquals(attempt, transfer(host).getJSONArray("attempts").length())
+                    assertTrue(transfer(host).getDouble("durationSeconds") > 0)
+                    assertTrue(transfer(host).getDouble("throughputMBps") > 0); checkCompleted()
+                }
+                send(true)
+                waitFor("Partial receiving") { transfer(host).optString("state") == "receiving" }
+                camera.stop()
+                waitFor("Interrupted transfer never ready") { transfer(host).optString("state") == "failed" }
+                assertFalse(transfer(host).getBoolean("checksumVerified"))
+                val done = CountDownLatch(1); var received: File? = null
+                host.completedSample { received = it; done.countDown() }
+                assertTrue(done.await(2, TimeUnit.SECONDS)); assertNull(received)
+                camera.connect(address, secret, port)
+                waitFor("Reconnect after interrupted transfer") { snapshot(host).optBoolean("authenticated") && snapshot(camera).optBoolean("authenticated") }
+                send()
+                waitFor("Retry completes") { transfer(host).optString("state") == "ready" && transfer(camera).optString("state") == "complete" }
+                checkCompleted()
+                val cleaned = CountDownLatch(1)
+                host.cleanupTransfer { assertNull(it); cleaned.countDown() }
+                assertTrue(cleaned.await(2, TimeUnit.SECONDS)); assertEquals("idle", transfer(host).getString("state"))
+            } finally { source.delete() }
             camera.stop()
             waitFor("Host permits reconnect") { snapshot(host).optString("state") == "listening" && !snapshot(host).optBoolean("authenticated") }
             camera.connect(address, secret, port)

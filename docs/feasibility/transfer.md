@@ -1,7 +1,7 @@
 # P0-04: Generated MP4 transfer
 
 Issue: [#10](https://github.com/vasuki20/cricket-replay/issues/10). Updated 2026-10-04.
-Status: iOS implementation and development checks pass. Real-phone transfer/playback results pending. Android is deferred by agreement.
+Status: iOS implementation and development checks pass. Android encryption, transfer, sample generation and native playback are now implemented; see [Android transfer checks](android-transfer.md). Mixed Android/iPhone transfer/playback in both host directions and interrupted-transfer retry pass by user report; numerical measurements and other physical checks remain pending. A second Android phone is still unavailable.
 
 ## Two-phone test
 
@@ -17,8 +17,8 @@ Install this build on **both** phones; protocol version 2 rejects older connecti
 | Pairing | Attempts 1 / 2 / 3 | Playback | Interruption / retry | Status |
 | --- | --- | --- | --- | --- |
 | iPhone 15 Pro ↔ iPhone 15, shared Wi-Fi | Pending: bytes, seconds, MB/s | Pending | Pending | NOT RUN |
-| Android ↔ Android | Deferred | Deferred | Deferred | NOT RUN |
-| Android ↔ iPhone, either host role | Deferred | Deferred | Deferred | NOT RUN |
+| Android ↔ Android | Pending; second phone needed | Pending | Pending | NOT RUN |
+| Android ↔ iPhone, either host role | User-reported pass; timings not supplied | User-reported pass | Requested slow-transfer retry passes by user report | USER-REPORTED PASS |
 
 Record host/camera roles, model/OS versions, network setup, data state, and results; reversing iPhone roles is a separate check. Do not include QR secrets in shared evidence. Computer loopback results below are development checks, not phone results.
 
@@ -50,4 +50,4 @@ xcrun swiftc ios/App/App/SampleTransfer.swift ios/App/App/SampleVideo.swift \
 /private/tmp/cricket-transfer-tests
 ```
 
-The signed build was installed and launched successfully on both connected iPhones via CoreDevice on 2026-10-04. Phone generation, transfer timings, and native playback still require the on-screen test above. #10 remains open pending those results and deferred platform/network pairings.
+The signed build was installed and launched successfully on both connected iPhones via CoreDevice on 2026-10-04. Mixed-phone generation, transfer/playback and slow-transfer retry subsequently passed by user report; see [Android physical results](android-transfer.md). iPhone-to-iPhone transfer, numerical timing evidence and remaining platform/network checks are still pending.
