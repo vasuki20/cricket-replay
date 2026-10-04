@@ -15,3 +15,11 @@ button:focus-visible { outline: 3px solid #d28d16; outline-offset: 3px; }
 dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 dt { font-weight: 600; } dd { margin: 0; overflow-wrap: anywhere; }
 .error { color: #9e2727; }
+label { display: block; margin: 16px 0; font-weight: 600; }
+input { display: block; width: 100%; margin-top: 8px; min-height: 48px; padding: 10px; border: 1px solid #446c5e; border-radius: 8px; font: inherit; }
+code { overflow-wrap: anywhere; }
+details { margin: 12px 0; }
+select { width: 100%; min-height: 48px; font: inherit; margin-top: 8px; }
+.pairing-qr { margin: 16px 0; text-align: center; }
+.pairing-qr img { display: block; width: min(100%, 320px); margin: auto; border: 24px solid white; background: white; image-rendering: pixelated; }
+.pairing-qr figcaption { margin-top: 12px; }

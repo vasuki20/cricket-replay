@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">Replay Feasibility</string>
     <string name="title_activity_main">Replay Feasibility</string>
-    <string name="package_name">com.vasuki.cricketreplay</string>
-    <string name="custom_url_scheme">com.vasuki.cricketreplay</string>
+    <string name="package_name">com.aadhinitinytales.cricketreplay</string>
+    <string name="custom_url_scheme">com.aadhinitinytales.cricketreplay</string>
 </resources>

@@ -1,4 +1,4 @@
-package com.vasuki.cricketreplay;
+package com.aadhinitinytales.cricketreplay;
 
 import com.getcapacitor.BridgeActivity;
 

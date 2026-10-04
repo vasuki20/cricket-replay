@@ -14,7 +14,7 @@ Proceed with the iOS portion of P0-02 with these outstanding P0-01 prerequisites
 | Component | Observed result | Readiness |
 | --- | --- | --- |
 | macOS | 26.5, build 25F71; arm64 | Local iOS toolchain available; no alternate machine required by initial checks |
-| Xcode | 26.6, build 17F113 | P0-02 unsigned iOS build passes; physical installation not tested |
+| Xcode | 26.6, build 17F113 | Unsigned iOS build passes; user reports physical installation/smoke-test success on 2026-10-04 |
 | Selected developer directory | `/Applications/Xcode.app/Contents/Developer` | Full Xcode selected |
 | Swift | 6.3.3, swiftlang-6.3.3.1.3 | Version check passes |
 | iPhoneOS SDK | 26.5 | SDK query passes; installed missing matching iOS simulator component during P0-02, then full unsigned build passed |
@@ -47,17 +47,19 @@ These are framework installation floors, not proof that any phone can capture co
 | Slot | Model / OS | Availability and installation evidence | Capture evidence |
 | --- | --- | --- | --- |
 | iPhone A | iPhone 15 Pro (`iPhone16,1`); reported iOS 26.3.1 (a), build 23D771330a | User confirms connected in Xcode Devices and Simulators; CoreDevice confirms connected, paired, wired; Developer Mode enabled and developer disk-image services available | Not run: rear camera, landscape 720p/30, no audio, continuous capture and extraction |
-| iPhone B | iPhone 15; OS not yet recorded | User confirms available at home for testing; connection, Developer Mode and installation not verified | Not run |
+| iPhone B | iPhone 15 (`iPhone15,4`); iOS 26.6, build 23G71 (queried 2026-10-04) | Connected in Xcode/CoreDevice, Developer Mode enabled, developer disk-image services available. User reports installation succeeded after switching Apple developer account; earlier registration-limit blocker resolved | Not run |
 | Android A | Unknown | Not available locally; friend testing planned for later | Not run |
 | Android B | Unknown | Not available locally; friend testing planned for later | Not run |
 
-Physical discovery initially timed out inside the execution sandbox. Repeating outside the sandbox succeeded. Initial device-detail discovery returned a developer disk-image mounting warning with `ddiServicesAvailable: false`. After the user checked the connection in Xcode, repeated discovery on 2026-10-03 returned `ddiServicesAvailable: true`, Developer Mode enabled and install/launch capabilities, without the mounting warning. The earlier warning has cleared; the exact cause is undetermined. A signed app installation/launch is still not tested. No device serial numbers, UDIDs or credentials are stored here.
+Physical discovery initially timed out inside the execution sandbox. Repeating outside the sandbox succeeded. Initial device-detail discovery returned a developer disk-image mounting warning with `ddiServicesAvailable: false`. After the user checked the connection in Xcode, repeated discovery on 2026-10-03 returned `ddiServicesAvailable: true`, Developer Mode enabled and install/launch capabilities, without the mounting warning. The earlier warning has cleared; the exact cause is undetermined. The user subsequently reports successful signed installation/testing on 2026-10-04; detailed checklist outcomes are not individually reported. No device serial numbers, UDIDs or credentials are stored here.
 
 All four pairings remain **not run**: Android host/Android camera; iPhone host/iPhone camera; Android host/iPhone camera; iPhone host/Android camera. Two phones of each platform are needed for the complete matrix. Both iPhones are now identified as available; iPhone B still needs on-machine verification and both Android phones remain unidentified.
 
 ## Local installation and signing
 
-For iOS, use Xcode automatic signing with an Apple Account and Personal Team if available. Paid distribution is not a prerequisite for this experiment. [Apple's account guidance](https://developer.apple.com/help/account/basics/about-your-developer-account) explains that Personal Team provisioning expires after seven days and requires rebuilding/reinstalling. The user clarified that signing/team setup is pending and no valid provisioning profile is available. Signed installation and phone testing are deferred until the user completes setup. Do not store account credentials, certificates or provisioning profiles in the repository.
+Update 2026-10-04: user reports successful app installation/testing after signing setup. The local Xcode project now selects automatic signing and a development team. This establishes user-reported iPhone installation success; individual permission/offline checks and iPhone B installation are still unreported. Preserve the user's local signing edits.
+
+For iOS, use Xcode automatic signing with an Apple Account and Personal Team if available. Paid distribution is not a prerequisite for this experiment. [Apple's account guidance](https://developer.apple.com/help/account/basics/about-your-developer-account) explains that Personal Team provisioning expires after seven days and requires rebuilding/reinstalling. Signing was pending on 2026-10-03 and the user reports successful installation/testing on 2026-10-04. Do not store account credentials, certificates or provisioning profiles in the repository.
 
 For Android, use the debug APK and development debug certificate. [Android signing guidance](https://developer.android.com/studio/publish/app-signing) documents IDE debug signing; [physical-device setup](https://developer.android.com/studio/run/device) covers USB debugging and device selection. Enable USB debugging, authorize this computer on the phone, then verify installation using the P0-02 harness. No paid distribution or runtime account is required.
 
@@ -87,8 +89,8 @@ Device discovery needs access to the macOS CoreDevice service. To inspect OS and
 
 1. Locate or install Android Studio 2025.2.1+, install API 36 and template-required build tools, update platform-tools, and configure the supplied Gradle JDK rather than default Java 11. Confirm SDK tools can be invoked reproducibly. No machine-wide tools have been changed by this inventory.
 2. iPhone A connection and developer disk-image services are now verified. Connect iPhone B when available, record its OS version, enable Developer Mode and verify it in Xcode and CoreDevice.
-3. Confirm an Apple Account can provide local signing; verify the phone is selectable as a run destination. Signed build/install/launch will be tested with the harness in P0-02.
+3. Local signing/install is user-reported successful on iPhone A. Verify installation on iPhone B and record its OS and detailed manual results.
 4. Identify Android A/B and iPhone B, recording exact model/OS and borrowing availability. For each Android phone, verify `adb devices -l` reports an authorized device; for each iPhone, verify Xcode destination selection.
 5. Measure native capture capabilities once the harness exists: rear-camera formats, frame-rate ranges, encoder compatibility and fallback. Hardware specifications alone do not satisfy capture verification.
 
-P0-01 remains open. Android build prerequisites, iPhone B installation readiness, signing and the complete Android device inventory are unresolved. Proceed with the iOS portion of P0-02 under the agreed sequence above; the full P0-01 dependency and epic exit gate remain unsatisfied.
+P0-01 remains open. Android build prerequisites, iPhone B installation readiness and the complete Android device inventory are unresolved. Proceed with the iOS portion of P0-02 under the agreed sequence above; the full P0-01 dependency and epic exit gate remain unsatisfied.

@@ -1,4 +1,4 @@
-package com.vasuki.cricketreplay
+package com.aadhinitinytales.cricketreplay
 
 import android.Manifest
 import android.os.Build

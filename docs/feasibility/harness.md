@@ -12,7 +12,7 @@ Pinned dependencies: Angular runtime/compiler 21.2.25; CLI/build 21.2.24 (the bu
 
 ## Build and run on iPhone
 
-Prerequisites: Node compatible with the pinned Angular version, Xcode 26+, its iOS platform component, an Apple Account/team available in Xcode, connected trusted iPhone with Developer Mode enabled. The user clarified that signing/team setup is pending and no valid provisioning profile is available. Installation and real-phone testing will follow after setup.
+Prerequisites: Node compatible with the pinned Angular version, Xcode 26+, its iOS platform component, an Apple Account/team available in Xcode, connected trusted iPhone with Developer Mode enabled. Signing was pending on 2026-10-03; on 2026-10-04 the user reports successful installation and testing on iPhone.
 
 ```sh
 npm ci
@@ -59,6 +59,8 @@ Install the resulting `android/app/build/outputs/apk/debug/app-debug.apk` using 
 
 ## Evidence recorded on 2026-10-03
 
+Follow-up on 2026-10-04: the user reports the app is installed and tested and “all looks okay.” Record this as a user-reported iPhone smoke-test pass, following signing setup. Exact native response, permission denial/regrant, offline relaunch and iPhone B checks have not been individually reported. Android acceptance remains deferred. The P0-03 screen and transport are now documented in [connectivity.md](connectivity.md); the original unimplemented-connection description above refers to the P0-02 build.
+
 | Check | Result |
 | --- | --- |
 | Dependency installation / npm lockfile | Pass |
@@ -70,10 +72,10 @@ Install the resulting `android/app/build/outputs/apk/debug/app-debug.apk` using 
 | iOS component installation | Pass; installed iOS 26.5 Simulator (23F77), arm64, using Xcode platform download |
 | Full unsigned iOS build after installation | Pass; Xcode 26.6, generic iOS destination, Debug; Swift plugin, storyboards and bundled web assets compiled; output `/private/tmp/cricket-replay-derived/Build/Products/Debug-iphoneos/App.app` |
 | Android project generation | Pass; automatic Gradle sync failed creating its sandbox-excluded cache; no Android build attempted after generation because toolchain work is deferred |
-| Physical iPhone install/launch/ping/permissions/offline UI | Not run |
+| Physical iPhone installation/smoke test | User-reported pass on 2026-10-04; exact native response, permission edge cases and offline relaunch not individually reported |
 | Physical Android install/launch/ping | Not run; phones and build prerequisites deferred |
 
-P0-02 remains open until physical-phone acceptance criteria have evidence. The project has been opened in Xcode for selecting the user's signing team and iPhone and running the signed app. The successful unsigned build does not establish native ping, permissions or offline UI behavior on a physical phone. Issues remain open; physical-phone testing is deferred while the user sets up signing.
+P0-02 remains open until physical-phone acceptance criteria have evidence. The project has been opened in Xcode for selecting the user's signing team and iPhone and running the signed app. The successful unsigned build does not establish native ping, permissions or offline UI behavior on a physical phone. Issues remain open; iPhone B and Android acceptance evidence remain pending. The updated P0-03 build requires fresh installation on both phones.
 
 ## Native plugin contract and references
 

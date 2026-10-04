@@ -4,10 +4,10 @@ apply plugin: 'org.jetbrains.kotlin.android'
 kotlin { jvmToolchain(21) }
 
 android {
-    namespace = "com.vasuki.cricketreplay"
+    namespace = "com.aadhinitinytales.cricketreplay"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.vasuki.cricketreplay"
+        applicationId "com.aadhinitinytales.cricketreplay"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
