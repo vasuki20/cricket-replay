@@ -21,21 +21,21 @@ Follow-up user evidence on 2026-10-04: after the four-step QR test (host starts/
 
 The final QR-enabled signed build was installed and launched on both connected iPhones via CoreDevice on 2026-10-04. Their installed bundle identifier is `com.aadhinitinytales.cricketreplay`, matching the user's updated signing configuration. Camera-based scanning and peer authentication still need the user's on-screen test.
 
-A native `NWListener` runs on the host phone, using a manually entered TCP port (default 8765). Camera initiates `NWConnection` to a manually entered private/link-local IPv4 address. Both directions share that connection. Cellular interfaces are prohibited. Host displays IPv4 interface candidates from Wi-Fi/hotspot interfaces; it does not assume a fixed hotspot gateway or select the correct candidate automatically. IPv6 and automatic discovery/QR are outside this spike.
+A native `NWListener` runs on the host phone, using a manually entered TCP port (default 8765). Camera initiates `NWConnection` to a manually entered private/link-local IPv4 address. Both directions share that connection. Cellular interfaces are prohibited. Host displays IPv4 interface candidates from Wi-Fi/hotspot interfaces; it does not assume a fixed hotspot gateway or select the correct candidate automatically. IPv6 and automatic discovery are outside this spike; QR pairing was added at the user’s request.
 
 Network creation/joining is manual in phone settings. The app does not create or configure a hotspot. Native status snapshots report listener/connection/authentication state, received requests/replies and monotonic round-trip timing. Ping and status requests receive authenticated acknowledgement messages; status confirms peer readiness, not recording capabilities. Capture and video transfer are not implemented by this ticket.
 
 Local Network permission is triggered by actual outgoing traffic. Listening alone does not establish permission approval. The app declares `NSLocalNetworkUsageDescription`; there is no invented permission boolean and no Bonjour/multicast entitlement. Waiting/failure text asks users to inspect Settings rather than treating every network error as permission denial. See [Apple TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
 
-On iOS background entry, the app closes listener/connection and clears native authentication state. Foregrounding requires explicit restart/reconnect. No unrestricted background hosting is claimed. A disconnected host keeps its listener for a new camera attempt while foreground. Handshake/connect attempts time out after 20 seconds; unanswered ping/status requests time out after eight seconds. One camera connection is accepted at a time, with at most four outstanding requests. Individual newline-delimited JSON frames are limited to 2048 bytes; oversized/invalid messages terminate the peer.
+On iOS background entry, the app closes listener/connection and clears native authentication state. Foregrounding requires explicit restart/reconnect. No unrestricted background hosting is claimed. A disconnected host keeps its listener for a new camera attempt while foreground. Handshake/connect attempts time out after 20 seconds; unanswered ping/status requests time out after eight seconds. One camera connection is accepted at a time, with at most four outstanding requests. Diagnostic newline-delimited JSON frames are limited to 2048 bytes; #10 allows authenticated encrypted transfer frames up to 65536 bytes. Oversized/invalid messages terminate the peer.
 
 ## Pairing protection decision for this spike
 
 Use a generated 128-bit random secret, displayed only when the host reveals it for manual entry. It is not sent over the connection or persisted to disk. Each connection has fresh nonces; both peers prove knowledge of the secret using CryptoKit HMAC-SHA256, then exchange an authenticated ready confirmation. Every subsequent message authenticates protocol version, sender/receiver nonces, direction, ordered sequence number, message type and request ID. Wrong secret, reflected proof, replay, sequence mismatch or message alteration terminates the peer. This is an experiment protocol, not an audited production pairing system.
 
-**Traffic is authenticated but not encrypted.** Only fixed diagnostic messages cross the wire. This channel must not carry video, personal data or future product traffic. There is no global TLS-validation bypass, trust-all certificate callback or ATS relaxation. HMAC is provided by [Apple CryptoKit](https://developer.apple.com/documentation/cryptokit/hmac), transport by [Network.framework](https://developer.apple.com/documentation/network/nwconnection).
+**Diagnostic traffic is authenticated but not encrypted.** The subsequent [#10 sample transfer experiment](transfer.md) uses protocol version 2 with encrypted video packets, separate directional session keys, and ciphertext covered by the frame HMAC. Install the updated build on both phones. There is no global TLS-validation bypass, trust-all certificate callback or ATS relaxation. HMAC is provided by [Apple CryptoKit](https://developer.apple.com/documentation/cryptokit/hmac), transport by [Network.framework](https://developer.apple.com/documentation/network/nwconnection).
 
-Production decision is pending: investigate a reviewed encrypted transport with scoped peer trust/pairing, including pinned TLS identity or compatible TLS-PSK support on both platforms. Confirm actual interoperability, provisioning/entitlement requirements and protection against active interception before carrying footage in #10. The status-only HMAC implementation does not establish production transport security or eliminate the Android implementation requirement.
+Production decision is pending: investigate a reviewed encrypted transport with scoped peer trust/pairing, including pinned TLS identity or compatible TLS-PSK support on both platforms. Confirm actual interoperability, provisioning/entitlement requirements and protection against active interception before production footage transfer. #10 encrypts synthetic sample packets for its bounded experiment; this does not settle the production transport decision. The status-only HMAC implementation does not establish production transport security or eliminate the Android implementation requirement.
 
 ## iPhone hotspot assumption: explicit risk
 
@@ -90,7 +90,7 @@ The updated signed app was installed and launched successfully on Karthik's iPho
 Reproduce the native tests (requires macOS Network.framework/CryptoKit):
 
 ```sh
-xcrun swiftc ios/App/App/LocalSession.swift ios/App/App/PairingCode.swift tests/ConnectivityTests.swift \
+xcrun swiftc ios/App/App/LocalSession.swift ios/App/App/PairingCode.swift ios/App/App/SampleTransfer.swift tests/ConnectivityTests.swift \
   -o /private/tmp/cricket-connectivity-tests
 /private/tmp/cricket-connectivity-tests
 ```

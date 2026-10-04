@@ -40,6 +40,12 @@ struct ConnectivityTests {
         require(hostAuth.acceptHello(cameraAuth.hello()), "host hello")
         require(cameraAuth.acceptHello(hostAuth.hello()), "camera hello")
         require(!hostAuth.acceptHello(cameraAuth.hello()), "reject repeated hello")
+        let transferID = UUID().uuidString
+        let encrypted = try! cameraAuth.encrypt(["kind": "chunk", "data": "test"], id: transferID)
+        require((try! hostAuth.decrypt(encrypted, id: transferID))["data"] as? String == "test", "AES-GCM directional round trip")
+        do { _ = try hostAuth.decrypt(encrypted, id: UUID().uuidString); require(false, "reject changed request ID") } catch {}
+        var corrupt = Data(base64Encoded: encrypted)!; corrupt[corrupt.count - 1] ^= 1
+        do { _ = try hostAuth.decrypt(corrupt.base64EncodedString(), id: transferID); require(false, "reject corrupted ciphertext") } catch {}
         let proof = hostAuth.signed(type: "auth", id: UUID().uuidString)!
         require(cameraAuth.verify(proof), "valid proof")
         require(!cameraAuth.verify(proof), "reject replay")
@@ -70,10 +76,46 @@ struct ConnectivityTests {
         camera.ping(status: true) { require($0, "camera status sent") }
         wait("bidirectional replies") { snapshot(host)["repliesReceived"] as? Int == 1 && snapshot(camera)["repliesReceived"] as? Int == 1 }
         require(snapshot(host)["lastRoundTripMs"] as? Double != nil, "round trip measured")
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("cricket-test-" + UUID().uuidString)
+        let bytes = Data((0..<100_000).map { UInt8($0 % 251) })
+        try! bytes.write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        func sendSample(slow: Bool = false) {
+            let done = DispatchSemaphore(value: 0)
+            camera.sendSample(source, slow: slow) { require($0 == nil, "sample starts"); done.signal() }
+            require(done.wait(timeout: .now() + 2) == .success, "sample callback")
+        }
+        func transfer(_ peer: LocalSession) -> [String: Any] { snapshot(peer)["transfer"] as? [String: Any] ?? [:] }
+        for attempt in 1...3 {
+            sendSample()
+            wait("encrypted sample complete") { transfer(host)["state"] as? String == "ready" && transfer(camera)["state"] as? String == "complete" }
+            require(transfer(host)["checksumVerified"] as? Bool == true, "host verifies checksum")
+            require((transfer(host)["attempts"] as? [[String: Any]])?.count == attempt, "attempt metrics retained")
+            let done = DispatchSemaphore(value: 0)
+            host.completedSample { url in
+                require(url != nil, "completed native URL")
+                require((try? Data(contentsOf: url!)) == bytes, "exact native file bytes")
+                done.signal()
+            }
+            require(done.wait(timeout: .now() + 2) == .success, "completed file callback")
+        }
+        sendSample(slow: true)
+        wait("partial sample receiving") { transfer(host)["state"] as? String == "receiving" }
         camera.stop()
+        wait("interruption discards partial") { transfer(host)["state"] as? String == "failed" }
+        require(transfer(host)["checksumVerified"] as? Bool == false, "partial never ready")
+        let partialDone = DispatchSemaphore(value: 0)
+        host.completedSample { require($0 == nil, "no playable partial URL"); partialDone.signal() }
+        require(partialDone.wait(timeout: .now() + 2) == .success, "partial callback")
         wait("host allows reconnect") { snapshot(host)["state"] as? String == "listening" && snapshot(host)["authenticated"] as? Bool == false }
         camera.connect(address: "127.0.0.1", secret: secret, port: port)
         wait("same-secret reconnect") { snapshot(camera)["authenticated"] as? Bool == true }
+        sendSample()
+        wait("retry completes") { transfer(host)["state"] as? String == "ready" && transfer(camera)["state"] as? String == "complete" }
+        let cleaned = DispatchSemaphore(value: 0)
+        host.cleanupTransfer { require($0 == nil, "cleanup complete"); cleaned.signal() }
+        require(cleaned.wait(timeout: .now() + 2) == .success, "cleanup callback")
+        require(transfer(host)["state"] as? String == "idle", "cleanup resets state")
         camera.stop()
         wait("host disconnected") { snapshot(host)["authenticated"] as? Bool == false }
         camera.connect(address: "127.0.0.1", secret: LocalSession.newSecret(), port: port)
@@ -81,6 +123,6 @@ struct ConnectivityTests {
         require(snapshot(host)["authenticated"] as? Bool == false, "wrong secret never authenticates")
         host.stop(reason: "Background simulation")
         wait("stop clears listener and authentication") { snapshot(host)["state"] as? String == "stopped" && snapshot(host)["authenticated"] as? Bool == false }
-        print("PASS: authentication, replay/tamper/reflection rejection, loopback bidirectional ping/status, reconnect, wrong-secret rejection and stop")
+        print("PASS: encrypted file transfer x3, exact bytes/checksum/metrics, interruption/retry/cleanup, AES-GCM tamper rejection, authentication, replay/tamper/reflection rejection, loopback bidirectional ping/status, reconnect, wrong-secret rejection and stop")
     }
 }

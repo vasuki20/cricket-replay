@@ -1,5 +1,6 @@
 import UIKit
 import AVFoundation
+import AVKit
 import Capacitor
 
 @objc(FeasibilityPlugin)
@@ -16,12 +17,75 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "sendSessionPing", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopSession", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "createPairingQR", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "scanPairingQR", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "scanPairingQR", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "generateSample", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "sampleStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "sendSample", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "playReceivedSample", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "cleanupSamples", returnType: CAPPluginReturnPromise)
     ]
     private let session = LocalSession()
     private var backgroundObserver: NSObjectProtocol?
     private var scanner: PairingScanner?
     private var requestingScan = false
+    private var sampleURL: URL?
+    private var sampleInfo: [String: Any] = ["ready": false]
+    private var generating = false
+
+    @objc func sampleStatus(_ call: CAPPluginCall) { DispatchQueue.main.async { call.resolve(self.sampleInfo) } }
+    @objc func generateSample(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            guard !self.generating else { call.reject("Already generating"); return }
+            // Reuse the same independent sample for all three timed attempts.
+            if self.sampleURL != nil { call.resolve(self.sampleInfo); return }
+            self.generating = true
+            SampleVideo.generate { result in
+                do {
+                    let url = try result.get()
+                    let bytes = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                    let hash = try SampleTransfer.checksum(url)
+                    DispatchQueue.main.async {
+                        self.generating = false; self.sampleURL = url
+                        self.sampleInfo = ["ready": true, "bytes": bytes, "sha256": hash, "durationSeconds": 20]
+                        call.resolve(self.sampleInfo)
+                    }
+                } catch { DispatchQueue.main.async { self.generating = false; call.reject(error.localizedDescription) } }
+            }
+        }
+    }
+    @objc func sendSample(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            guard let url = self.sampleURL else { call.reject("Generate the sample first"); return }
+            self.session.sendSample(url, slow: call.getBool("slow") ?? false) { error in
+                if let error { call.reject(error.localizedDescription) } else { call.resolve() }
+            }
+        }
+    }
+    @objc func playReceivedSample(_ call: CAPPluginCall) {
+        session.completedSample { url in
+            guard let url else { call.reject("No complete, checksum-verified sample"); return }
+            DispatchQueue.main.async {
+                guard let presenter = self.bridge?.viewController, presenter.presentedViewController == nil,
+                      UIApplication.shared.applicationState == .active else { call.reject("Return to the app before playback"); return }
+                let player = AVPlayerViewController(); player.player = AVPlayer(url: url)
+                presenter.present(player, animated: true) { player.player?.play(); call.resolve() }
+            }
+        }
+    }
+    @objc func cleanupSamples(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            guard !self.generating, self.bridge?.viewController?.presentedViewController == nil else { call.reject("Finish generation/playback before cleanup"); return }
+            self.session.cleanupTransfer { error in
+                DispatchQueue.main.async {
+                    if let error { call.reject(error.localizedDescription); return }
+                    do {
+                        if let url = self.sampleURL { try FileManager.default.removeItem(at: url) }
+                        self.sampleURL = nil; self.sampleInfo = ["ready": false]; call.resolve()
+                    } catch { call.reject(error.localizedDescription) }
+                }
+            }
+        }
+    }
 
     @objc func createPairingQR(_ call: CAPPluginCall) {
         guard let (secret, port) = options(call) else { return }

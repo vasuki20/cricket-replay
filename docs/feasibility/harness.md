@@ -35,7 +35,19 @@ xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Debug \
 
 If Xcode reports “iOS 26.5 is not installed”, open **Xcode → Settings → Components** and install the matching iOS platform. Command-line platform download is `xcodebuild -downloadPlatform iOS -architectureVariant arm64`. A SDK version query alone did not establish full platform readiness on this machine.
 
-## Android path (verification deferred)
+## Android path
+
+Update 2026-10-04: OnePlus Nord CE 3 Lite 5G (CPH2465), Android 14 / OxygenOS 14.0, is now available. SDK platform 36 and build-tools 36.0.0 are installed. Java 21.0.12.1, Gradle Debug build, physical APK installation, launch, and a native diagnostics response passed. The on-device screen shows `android`, app version `0.1.0`, OS `14`, camera permission `granted`. This establishes the harness bridge, not connectivity or transfer. Denial/regrant and offline relaunch remain pending.
+
+The current local build uses a temporary Java 21 runtime; a durable Java 21 installation/Android Studio Gradle JDK configuration is still needed for builds after temporary files are removed. Reproduce with the current runtime:
+
+```sh
+npm run sync:android
+cd android
+JAVA_HOME=/private/tmp/cricket-jdk21/jdk-21.0.12.1+1/Contents/Home ./gradlew :app:assembleDebug
+```
+
+ADB is at `~/Library/Android/sdk/platform-tools/adb`. Select the physical phone explicitly if an emulator is also listed; install with `adb -s <device> install --no-streaming -r app/build/outputs/apk/debug/app-debug.apk`. User authorization of USB debugging and any phone installation prompt is required. Generated Gradle/Kotlin caches and debug artifacts are ignored by Git.
 
 Kotlin `FeasibilityPlugin` is registered by `MainActivity`. Gradle pins Kotlin 2.2.20 and uses JDK 21; the Capacitor template uses AGP 8.13.0, Gradle 8.14.3 and Android compile/target API 36. Install the missing P0-01 prerequisites before building. No Android build or device support is claimed yet.
 
@@ -73,7 +85,7 @@ Follow-up on 2026-10-04: the user reports the app is installed and tested and �
 | Full unsigned iOS build after installation | Pass; Xcode 26.6, generic iOS destination, Debug; Swift plugin, storyboards and bundled web assets compiled; output `/private/tmp/cricket-replay-derived/Build/Products/Debug-iphoneos/App.app` |
 | Android project generation | Pass; automatic Gradle sync failed creating its sandbox-excluded cache; no Android build attempted after generation because toolchain work is deferred |
 | Physical iPhone installation/smoke test | User-reported pass on 2026-10-04; exact native response, permission edge cases and offline relaunch not individually reported |
-| Physical Android install/launch/ping | Not run; phones and build prerequisites deferred |
+| Physical Android install/launch/ping | Pass on OnePlus CPH2465, Android 14 / OxygenOS 14.0 on 2026-10-04; native response and granted camera permission observed; edge cases pending |
 
 P0-02 remains open until physical-phone acceptance criteria have evidence. The project has been opened in Xcode for selecting the user's signing team and iPhone and running the signed app. The successful unsigned build does not establish native ping, permissions or offline UI behavior on a physical phone. Issues remain open; iPhone B and Android acceptance evidence remain pending. The updated P0-03 build requires fresh installation on both phones.
 

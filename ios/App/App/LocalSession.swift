@@ -3,7 +3,7 @@ import Network
 import CryptoKit
 import Darwin
 
-// Status-only feasibility transport. Authenticated, NOT encrypted; never send video here.
+// Status frames are authenticated; transfer packets additionally use session-scoped AES-GCM.
 final class SessionAuthentication {
     let nonce: String
     private let key: SymmetricKey
@@ -17,32 +17,51 @@ final class SessionAuthentication {
         key = SymmetricKey(data: Data(secret.utf8))
         nonce = UUID().uuidString.lowercased()
     }
-    func hello() -> [String: Any] { ["type": "hello", "nonce": nonce, "role": role] }
+    func hello() -> [String: Any] { ["type": "hello", "nonce": nonce, "role": role, "protocol": 2] }
     func acceptHello(_ frame: [String: Any]) -> Bool {
-        guard peerNonce == nil, frame["type"] as? String == "hello",
+        guard peerNonce == nil, frame["type"] as? String == "hello", frame["protocol"] as? Int == 2,
               let n = frame["nonce"] as? String, UUID(uuidString: n) != nil,
               frame["role"] as? String == (role == "host" ? "camera" : "host") else { return false }
         peerNonce = n
         return true
     }
-    private func bytes(sender: String, receiver: String, direction: String, sequence: Int, type: String, id: String) -> Data {
-        Data("cricket-p0-v1|\(sender)|\(receiver)|\(direction)|\(sequence)|\(type)|\(id)".utf8)
+    private func bytes(sender: String, receiver: String, direction: String, sequence: Int, type: String, id: String, payload: String) -> Data {
+        Data("cricket-p0-v2|\(sender)|\(receiver)|\(direction)|\(sequence)|\(type)|\(id)|\(payload)".utf8)
     }
-    func signed(type: String, id: String) -> [String: Any]? {
+    func signed(type: String, id: String, payload: String = "") -> [String: Any]? {
         guard let peerNonce else { return nil }
         sent += 1
-        let mac = HMAC<SHA256>.authenticationCode(for: bytes(sender: nonce, receiver: peerNonce, direction: role, sequence: sent, type: type, id: id), using: key)
-        return ["type": type, "id": id, "seq": sent, "mac": Data(mac).base64EncodedString()]
+        let mac = HMAC<SHA256>.authenticationCode(for: bytes(sender: nonce, receiver: peerNonce, direction: role, sequence: sent, type: type, id: id, payload: payload), using: key)
+        return ["type": type, "id": id, "seq": sent, "mac": Data(mac).base64EncodedString(), "payload": payload]
     }
     func verify(_ frame: [String: Any]) -> Bool {
         guard let peerNonce, let seq = frame["seq"] as? Int, seq == received + 1,
-              let type = frame["type"] as? String, ["auth", "ready", "ping", "pong", "status", "statusReply"].contains(type),
+              let type = frame["type"] as? String, ["auth", "ready", "ping", "pong", "status", "statusReply", "transfer"].contains(type),
               let id = frame["id"] as? String, UUID(uuidString: id) != nil,
               let encoded = frame["mac"] as? String, let mac = Data(base64Encoded: encoded), mac.count == 32,
               HMAC<SHA256>.isValidAuthenticationCode(mac,
-                authenticating: bytes(sender: peerNonce, receiver: nonce, direction: role == "host" ? "camera" : "host", sequence: seq, type: type, id: id), using: key) else { return false }
+                authenticating: bytes(sender: peerNonce, receiver: nonce, direction: role == "host" ? "camera" : "host", sequence: seq, type: type, id: id, payload: frame["payload"] as? String ?? ""), using: key) else { return false }
         received = seq
         return true
+    }
+    private func transferKey(direction: String) throws -> SymmetricKey {
+        guard let peerNonce else { throw TransferError.invalid("No authenticated peer") }
+        let host = role == "host" ? nonce : peerNonce, camera = role == "camera" ? nonce : peerNonce
+        return HKDF<SHA256>.deriveKey(inputKeyMaterial: key, salt: Data("\(host)|\(camera)".utf8),
+            info: Data("cricket-p0-v2-aes-gcm-\(direction)".utf8), outputByteCount: 32)
+    }
+    func encrypt(_ packet: [String: Any], id: String) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: packet)
+        let box = try AES.GCM.seal(data, using: transferKey(direction: role), authenticating: Data(id.utf8))
+        guard let combined = box.combined else { throw TransferError.invalid("Encryption failed") }
+        return combined.base64EncodedString()
+    }
+    func decrypt(_ payload: String, id: String) throws -> [String: Any] {
+        guard payload.count <= 60000, let data = Data(base64Encoded: payload) else { throw TransferError.invalid("Invalid encrypted packet") }
+        let box = try AES.GCM.SealedBox(combined: data)
+        let plain = try AES.GCM.open(box, using: transferKey(direction: role == "host" ? "camera" : "host"), authenticating: Data(id.utf8))
+        guard let packet = try JSONSerialization.jsonObject(with: plain) as? [String: Any] else { throw TransferError.invalid("Invalid transfer payload") }
+        return packet
     }
 }
 
@@ -61,13 +80,36 @@ final class LocalSession {
     private var handshake = "hello"
     private var snapshot: [String: Any] = ["state": "stopped", "detail": "No session", "role": "host", "addresses": [], "pingsReceived": 0, "repliesReceived": 0]
     var onChange: (([String: Any]) -> Void)?
+    private lazy var transfer: SampleTransfer = {
+        let engine = SampleTransfer(queue: queue)
+        engine.onSend = { [weak self] id, packet in
+            guard let self, self.authenticated, let auth = self.authentication else { return }
+            do {
+                let payload = try auth.encrypt(packet, id: id)
+                if let frame = auth.signed(type: "transfer", id: id, payload: payload) { self.send(frame) }
+            } catch { self.failPeer(error.localizedDescription) }
+        }
+        engine.onChange = { [weak self] state in self?.snapshot["transfer"] = state }
+        engine.onFailure = { [weak self] detail in self?.failPeer(detail) }
+        return engine
+    }()
+    func sendSample(_ url: URL, slow: Bool, completion: @escaping (Error?) -> Void) {
+        queue.async {
+            guard self.role == "camera", self.authenticated else { completion(TransferError.invalid("Connect camera to host first")); return }
+            do { try self.transfer.begin(url, slow: slow); completion(nil) } catch { completion(error) }
+        }
+    }
+    func completedSample(_ completion: @escaping (URL?) -> Void) { queue.async { completion(self.transfer.completed) } }
+    func cleanupTransfer(_ completion: @escaping (Error?) -> Void) {
+        queue.async { do { try self.transfer.cleanup(); completion(nil) } catch { completion(error) } }
+    }
 
     private func publish(_ state: String, _ detail: String) {
         snapshot["state"] = state; snapshot["detail"] = detail; snapshot["role"] = role
         snapshot["authenticated"] = authenticated
         onChange?(snapshot)
     }
-    func status(_ completion: @escaping ([String: Any]) -> Void) { queue.async { completion(self.snapshot) } }
+    func status(_ completion: @escaping ([String: Any]) -> Void) { queue.async { self.snapshot["transfer"] = self.transfer.state; completion(self.snapshot) } }
     static func newSecret() -> String {
         let key = SymmetricKey(size: .bits128)
         return key.withUnsafeBytes { Data($0).map { String(format: "%02x", $0) }.joined() }
@@ -150,14 +192,15 @@ final class LocalSession {
             if let data { self.buffer.append(data) }
             while let newline = self.buffer.firstIndex(of: 10) {
                 let line = self.buffer.prefix(upTo: newline)
-                guard line.count <= 2048, let frame = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
+                guard line.count <= 65536, let frame = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                      line.count <= 2048 || (self.authenticated && frame["type"] as? String == "transfer") else {
                     self.failPeer("Invalid or oversized message"); return
                 }
                 self.buffer.removeSubrange(...newline)
                 self.handle(frame)
                 if self.connection !== conn { return }
             }
-            if self.buffer.count > 2048 { self.failPeer("Oversized message"); return }
+            if self.buffer.count > (self.authenticated ? 65536 : 2048) { self.failPeer("Oversized message"); return }
             if complete || error != nil { self.failPeer(error?.localizedDescription ?? "Peer disconnected"); return }
             self.receive(conn)
         }
@@ -183,6 +226,11 @@ final class LocalSession {
         }
         guard authenticated else { failPeer("Peer not authenticated"); return }
         switch type {
+        case "transfer":
+            do {
+                guard let payload = frame["payload"] as? String else { throw TransferError.invalid("Missing encrypted payload") }
+                transfer.receive(id: id, packet: try auth.decrypt(payload, id: id), isHost: role == "host")
+            } catch { failPeer(error.localizedDescription) }
         case "ping", "status":
             snapshot["pingsReceived"] = (snapshot["pingsReceived"] as? Int ?? 0) + 1
             signed(type == "ping" ? "pong" : "statusReply", id)
@@ -211,6 +259,7 @@ final class LocalSession {
         }
     }
     private func failPeer(_ detail: String) {
+        transfer.cancel(detail)
         timeout?.cancel(); timeout = nil
         connection?.stateUpdateHandler = nil; connection?.cancel(); connection = nil
         authentication = nil; authenticated = false; buffer.removeAll()

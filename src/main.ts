@@ -1,13 +1,13 @@
 import { Component, OnDestroy, signal } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { Capacitor } from '@capacitor/core';
-import { Diagnostics, Feasibility, SessionStatus } from './native';
+import { Diagnostics, Feasibility, SessionStatus, SampleStatus } from './native';
 
 @Component({
   selector: 'replay-app', standalone: true,
   template: `
     <main>
-      <header><p class="eyebrow">CRICKET REPLAY · P0-03</p><h1>Feasibility harness</h1>
+      <header><p class="eyebrow">CRICKET REPLAY · P0-04</p><h1>Feasibility harness</h1>
         <p>Local experiments on real phones. Players make the decisions.</p></header>
       <section><h2>Phone role</h2><div class="roles">
         <button [disabled]="sessionActive() || networkBusy()" [attr.aria-pressed]="role() === 'host'" (click)="role.set('host')">Host</button>
@@ -78,7 +78,32 @@ import { Diagnostics, Feasibility, SessionStatus } from './native';
           @if (networkError()) { <p class="error" role="alert">{{ networkError() }}</p> }
         </div>
         <p>Local Network access is requested by outgoing connections; a listening host alone may not show a prompt. Permission errors require checking Settings.</p>
-        <p>Status-only experiment: messages are authenticated but unencrypted. Do not send footage. Backgrounding stops the session; restart after returning.</p>
+        <p>Status messages are authenticated; sample video packets are encrypted. Backgrounding stops the session; restart after returning.</p>
+      </section>
+      <section><h2>Sample video transfer</h2>
+        <p>Generate a synthetic 20-second MP4 on the camera phone, send it, then play the verified file on the host.</p>
+        @if (role() === 'camera') {
+          <button [disabled]="!networkSupported || transferBusy() || transferActive()" (click)="sampleAction('generate')">Generate 20-second sample</button>
+          <p>{{ sample().ready ? 'Sample ready: ' + sample().bytes + ' bytes' : 'No generated sample' }}</p>
+          <label><input type="checkbox" [checked]="slowTransfer()" [disabled]="transferActive()" (change)="slowTransfer.set($any($event.target).checked)"> Slow transfer for interruption test</label>
+          <button [disabled]="!sample().ready || !session()?.authenticated || transferBusy() || transferActive()" (click)="sampleAction('send')">Send sample to host</button>
+        } @else {
+          <button [disabled]="session()?.transfer?.state !== 'ready' || !session()?.transfer?.checksumVerified || transferBusy()" (click)="sampleAction('play')">Play verified sample</button>
+        }
+        <button [disabled]="!networkSupported || transferBusy() || transferActive()" (click)="sampleAction('cleanup')">Delete temporary samples</button>
+        @if (transferBusy()) { <p>Working…</p> }
+        @if (session()?.transfer; as t) {
+          <p>{{ t.state }} · {{ t.detail }}</p>
+          <progress [value]="t.bytes" [max]="t.totalBytes || 1"></progress>
+          <p>{{ t.bytes }} / {{ t.totalBytes }} bytes · Checksum: {{ t.checksumVerified ? 'verified' : 'pending' }}</p>
+          @if (t.requestId) { <p>Request: <code>{{ t.requestId }}</code></p> }
+          @if (t.sha256) { <details><summary>SHA-256</summary><code>{{ t.sha256 }}</code></details> }
+          @for (attempt of t.attempts ?? []; track attempt.requestId) {
+            <p>{{ attempt.requestId }}: {{ attempt.totalBytes }} bytes in {{ attempt.durationSeconds?.toFixed(2) }} s · {{ attempt.throughputMBps?.toFixed(2) }} MB/s</p>
+          }
+        }
+        @if (transferError()) { <p class="error" role="alert">{{ transferError() }}</p> }
+        <p>Repeat Send sample three times. To test interruption, enable slow transfer and stop the session partway through; reconnect and retry. Partial files cannot be played.</p>
       </section>
       <section><h2>Experiment status</h2><dl>
         <dt>Capture</dt><dd>Not implemented — P0-05 / P0-06</dd>
@@ -100,6 +125,10 @@ class App implements OnDestroy {
   readonly session = signal<SessionStatus | null>(null);
   readonly networkBusy = signal(false);
   readonly networkError = signal('');
+  readonly sample = signal<SampleStatus>({ ready: false });
+  readonly transferBusy = signal(false);
+  readonly transferError = signal('');
+  readonly slowTransfer = signal(false);
   readonly qrImage = signal('');
   readonly qrAddress = signal('');
   private qrKey = '';
@@ -111,9 +140,22 @@ class App implements OnDestroy {
   private async refresh() {
     if (this.polling) return;
     this.polling = true;
-    try { this.session.set(await Feasibility.sessionStatus()); await this.refreshQR(); }
+    try { this.session.set(await Feasibility.sessionStatus()); this.sample.set(await Feasibility.sampleStatus()); await this.refreshQR(); }
     catch (error) { this.networkError.set(error instanceof Error ? error.message : String(error)); }
     finally { this.polling = false; }
+  }
+  transferActive() { return ['offer', 'sending', 'receiving', 'finishing'].includes(this.session()?.transfer?.state ?? 'idle'); }
+  async sampleAction(action: 'generate' | 'send' | 'play' | 'cleanup') {
+    if (this.transferBusy()) return;
+    this.transferBusy.set(true); this.transferError.set('');
+    try {
+      if (action === 'generate') this.sample.set(await Feasibility.generateSample());
+      else if (action === 'send') await Feasibility.sendSample({ slow: this.slowTransfer() });
+      else if (action === 'play') await Feasibility.playReceivedSample();
+      else await Feasibility.cleanupSamples();
+      await this.refresh();
+    } catch (error) { this.transferError.set(error instanceof Error ? error.message : String(error)); }
+    finally { this.transferBusy.set(false); }
   }
   async refreshQR() {
     const state = this.session();
