@@ -29,7 +29,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus } from './native'
       </section>
       <section><h2>Offline connection</h2>
         <p>Join the same local Wi-Fi network manually. Keep both apps foreground. No computer coordinates this session.</p>
-        @if (!networkSupported) { <p>Connection experiment currently supports installed iPhone apps. Android verification is deferred.</p> }
+        @if (!networkSupported) { <p>Connection checks require an installed iPhone or Android app.</p> }
         @if (role() === 'host') {
           <button [disabled]="!networkSupported || sessionActive() || networkBusy()" (click)="networkAction('start')">Start host & show QR</button>
           @if (session()?.state === 'listening') {
@@ -77,10 +77,12 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus } from './native'
           }
           @if (networkError()) { <p class="error" role="alert">{{ networkError() }}</p> }
         </div>
-        <p>Local Network access is requested by outgoing connections; a listening host alone may not show a prompt. Permission errors require checking Settings.</p>
+        @if (runtime === 'ios') { <p>Local Network access is requested by outgoing connections; a listening host alone may not show a prompt. Permission errors require checking Settings.</p> }
+        @else { <p>Join Wi-Fi manually. Android camera connections use the Wi-Fi network; QR scanning requires camera permission.</p> }
         <p>Status messages are authenticated; sample video packets are encrypted. Backgrounding stops the session; restart after returning.</p>
       </section>
       <section><h2>Sample video transfer</h2>
+        @if (!transferSupported) { <p>Android pairing is available. Video transfer is pending the next Android task.</p> } @else {
         <p>Generate a synthetic 20-second MP4 on the camera phone, send it, then play the verified file on the host.</p>
         @if (role() === 'camera') {
           <button [disabled]="!networkSupported || transferBusy() || transferActive()" (click)="sampleAction('generate')">Generate 20-second sample</button>
@@ -104,6 +106,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus } from './native'
         }
         @if (transferError()) { <p class="error" role="alert">{{ transferError() }}</p> }
         <p>Repeat Send sample three times. To test interruption, enable slow transfer and stop the session partway through; reconnect and retry. Partial files cannot be played.</p>
+        }
       </section>
       <section><h2>Experiment status</h2><dl>
         <dt>Capture</dt><dd>Not implemented — P0-05 / P0-06</dd>
@@ -118,7 +121,8 @@ class App implements OnDestroy {
   readonly busy = signal(false);
   readonly diagnostics = signal<Diagnostics | null>(null);
   readonly error = signal('');
-  readonly networkSupported = this.native && this.runtime === 'ios';
+  readonly networkSupported = this.native && ['ios', 'android'].includes(this.runtime);
+  readonly transferSupported = this.native && this.runtime === 'ios';
   readonly secret = signal('');
   readonly port = signal(8765);
   readonly address = signal('');
@@ -140,7 +144,7 @@ class App implements OnDestroy {
   private async refresh() {
     if (this.polling) return;
     this.polling = true;
-    try { this.session.set(await Feasibility.sessionStatus()); this.sample.set(await Feasibility.sampleStatus()); await this.refreshQR(); }
+    try { this.session.set(await Feasibility.sessionStatus()); if (this.transferSupported) this.sample.set(await Feasibility.sampleStatus()); await this.refreshQR(); }
     catch (error) { this.networkError.set(error instanceof Error ? error.message : String(error)); }
     finally { this.polling = false; }
   }

@@ -49,7 +49,7 @@ JAVA_HOME=/private/tmp/cricket-jdk21/jdk-21.0.12.1+1/Contents/Home ./gradlew :ap
 
 ADB is at `~/Library/Android/sdk/platform-tools/adb`. Select the physical phone explicitly if an emulator is also listed; install with `adb -s <device> install --no-streaming -r app/build/outputs/apk/debug/app-debug.apk`. User authorization of USB debugging and any phone installation prompt is required. Generated Gradle/Kotlin caches and debug artifacts are ignored by Git.
 
-Kotlin `FeasibilityPlugin` is registered by `MainActivity`. Gradle pins Kotlin 2.2.20 and uses JDK 21; the Capacitor template uses AGP 8.13.0, Gradle 8.14.3 and Android compile/target API 36. Install the missing P0-01 prerequisites before building. No Android build or device support is claimed yet.
+Kotlin `FeasibilityPlugin` is registered by `MainActivity`. Gradle pins Kotlin 2.2.20 and uses JDK 21; the Capacitor template uses AGP 8.13.0, Gradle 8.14.3 and Android compile/target API 36. Install the missing P0-01 prerequisites before building. This described the initial scaffold; the dated update above supersedes its deferred build status.
 
 ```sh
 npm ci
@@ -71,7 +71,7 @@ Install the resulting `android/app/build/outputs/apk/debug/app-debug.apk` using 
 
 ## Evidence recorded on 2026-10-03
 
-Follow-up on 2026-10-04: the user reports the app is installed and tested and “all looks okay.” Record this as a user-reported iPhone smoke-test pass, following signing setup. Exact native response, permission denial/regrant, offline relaunch and iPhone B checks have not been individually reported. Android acceptance remains deferred. The P0-03 screen and transport are now documented in [connectivity.md](connectivity.md); the original unimplemented-connection description above refers to the P0-02 build.
+Follow-up on 2026-10-04: the user reports the app is installed and tested and “all looks okay.” Record this as a user-reported iPhone smoke-test pass, following signing setup. Exact native response, permission denial/regrant, offline relaunch and iPhone B checks have not been individually reported. Android acceptance remains deferred. Android host/camera QR pairing and diagnostics now follow the shared UI/contract; see [Android connectivity](android-connectivity.md) for development checks and pending mixed-phone tests. The P0-03 screen and transport are documented in [connectivity.md](connectivity.md); the original unimplemented-connection description above refers to the P0-02 build.
 
 | Check | Result |
 | --- | --- |

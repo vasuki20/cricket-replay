@@ -1,0 +1,56 @@
+[
+  {
+    "frames" : [
+      {
+        "id" : "3eacefb4-ae61-473e-a10a-271607b94c45",
+        "mac" : "P2ix7Nq2AMTRijuHAtWwjPCbINS+NfaxfW+pLLrczlg=",
+        "payload" : "",
+        "seq" : 1,
+        "type" : "auth"
+      },
+      {
+        "id" : "dfb50347-50f8-4106-9b57-98058dd8db81",
+        "mac" : "WFPBT+e96JylHKkW1fpVRiLLdelGcE5XSNfjw4YfghI=",
+        "payload" : "fixture-data",
+        "seq" : 2,
+        "type" : "ping"
+      }
+    ],
+    "hello" : {
+      "nonce" : "9b966810-66ee-423d-9c15-bca1bd9074d1",
+      "protocol" : 2,
+      "role" : "host",
+      "type" : "hello"
+    },
+    "nonce" : "b5343410-e2b9-4096-ae9d-a0ee00c5bce3",
+    "role" : "camera",
+    "secret" : "00112233445566778899aabbccddeeff00"
+  },
+  {
+    "frames" : [
+      {
+        "id" : "2a0513a4-da19-4e01-9cf6-c36f59795a30",
+        "mac" : "l02G+P0Sq55uvxmVspBxq7xtI2Ra4e6MSnedhLLICQw=",
+        "payload" : "",
+        "seq" : 1,
+        "type" : "auth"
+      },
+      {
+        "id" : "32174552-0384-4109-8d85-06c80d151f10",
+        "mac" : "gBv6zYGmAapSiqVZiJ9kJx6xTDvVopp6XMUhOPP+wIk=",
+        "payload" : "",
+        "seq" : 2,
+        "type" : "status"
+      }
+    ],
+    "hello" : {
+      "nonce" : "b5343410-e2b9-4096-ae9d-a0ee00c5bce3",
+      "protocol" : 2,
+      "role" : "camera",
+      "type" : "hello"
+    },
+    "nonce" : "9b966810-66ee-423d-9c15-bca1bd9074d1",
+    "role" : "host",
+    "secret" : "00112233445566778899aabbccddeeff00"
+  }
+]

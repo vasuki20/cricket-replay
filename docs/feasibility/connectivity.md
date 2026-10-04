@@ -1,11 +1,11 @@
 # P0-03: Offline phone-hosted connection
 
 Issue: [#9](https://github.com/vasuki20/cricket-replay/issues/9). Updated 2026-10-04 (Asia/Singapore).
-Status: iOS experiment implemented and build-tested; shared-Wi-Fi QR pairing and peer ping **pass by user report** on the two iPhones. Android connectivity implementation and verification are deferred under the agreed iPhone-first sequence.
+Status: iOS experiment implemented and build-tested; shared-Wi-Fi QR pairing and peer ping **pass by user report** on the two iPhones. Android hosting, QR pairing and diagnostics are now implemented; [on-device development checks pass](android-connectivity.md). Mixed-phone QR pairing/authentication and ping/status now pass by user report in both host directions; timings, edge cases and hotspot tests remain pending.
 
 ## Architecture and limits
 
-User-requested scope update on 2026-10-04: move QR pairing into this iPhone experiment because manual secret entry made testing difficult. Host now starts with a fresh generated secret and displays a QR code; the camera scans it and connects automatically. Manual entry remains under **Manual connection options**. QR includes a versioned Replay marker, private IPv4 address, port and session secret, generated locally with Core Image and scanned with AVFoundation. Invalid payloads/versions, non-local endpoints and invalid ports/secrets are rejected; camera denial, cancellation and interruption return visible errors. No third-party QR service or dependency is used. Android scanning remains deferred.
+User-requested scope update on 2026-10-04: move QR pairing into this iPhone experiment because manual secret entry made testing difficult. Host now starts with a fresh generated secret and displays a QR code; the camera scans it and connects automatically. Manual entry remains under **Manual connection options**. QR includes a versioned Replay marker, private IPv4 address, port and session secret, generated locally with Core Image and scanned with AVFoundation. Invalid payloads/versions, non-local endpoints and invalid ports/secrets are rejected; camera denial, cancellation and interruption return visible errors. No third-party QR service or dependency is used. Android scanning is now implemented; physical mixed-phone QR checks pass by user report.
 
 ### Quick QR test
 
@@ -68,10 +68,10 @@ Rebuild/install **this updated app on both iPhones** using Xcode signing. The ol
 
 | Host → camera | Devices / OS | Network, data/SIM state | Result | Limitations / evidence |
 | --- | --- | --- | --- | --- |
-| Android → Android | Not identified | Not run | NOT RUN | Phones, Android build toolchain and connectivity implementation deferred |
+| Android → Android | OnePlus CPH2465, Android 14 / OxygenOS 14.0; second phone pending | Not run | NOT RUN | Android implementation and same-phone development tests pass; second physical Android needed |
 | iPhone → iPhone | iPhone 15 Pro: previously reported iOS 26.3.1 (a); iPhone 15: queried iOS 26.6 | Shared Wi-Fi, mobile data off (user confirmed); Wi-Fi internet availability not verified; hotspot not run | USER-REPORTED PASS for QR pairing/authentication and peer ping | Exact timings and role reversal pending; interruptions and hotspot creation unverified |
-| Android → iPhone | Android pending; iPhone candidates above | Not run | NOT RUN | Deferred |
-| iPhone → Android | iPhone candidates above; Android pending | Not run | NOT RUN | Deferred |
+| Android → iPhone | OnePlus CPH2465; exact iPhone used unreported | Shared-Wi-Fi/mobile-data-off procedure requested; state not separately confirmed for this run | USER-REPORTED PASS: QR/authentication/ping/status | Timings, permission/interruption checks and hotspot pending |
+| iPhone → Android | Exact iPhone used unreported; OnePlus CPH2465 | Same requested procedure | USER-REPORTED PASS: QR/authentication/ping/status | Detailed evidence in android-connectivity.md; edge cases pending |
 
 For each real test append: date, model/OS, host/camera roles, network setup and interface/address used, mobile-data state, SIM/service dependency, permissions, three connection/ping timings, wrong-secret result, interruption/lifecycle observations and pass/fail with limits. Do not publish personal identifiers or session secrets.
 
@@ -95,4 +95,4 @@ xcrun swiftc ios/App/App/LocalSession.swift ios/App/App/PairingCode.swift ios/Ap
 /private/tmp/cricket-connectivity-tests
 ```
 
-These loopback checks use a computer solely for development verification. They are not any entry in the real-phone results matrix. #9 remains open pending actual pairings, Android implementation and the transport/hotspot findings.
+These loopback checks use a computer solely for development verification. They are not any entry in the real-phone results matrix. #9 is closed on GitHub as of 2026-10-04; the full physical pairing matrix and transport/hotspot findings still lack evidence. Keep these checks pending in the feasibility record.
