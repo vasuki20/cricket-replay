@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        A10000000000000000000013 /* RecordingPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014; };
+        A10000000000000000000011 /* RollingRecording.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012; };
+        A1000000000000000000000F /* RecordingClip.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010; };
+        A1000000000000000000000D /* RecordingBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000E; };
         A1000000000000000000000B /* SampleVideo.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000C; };
         A10000000000000000000009 /* SampleTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000A; };
         A10000000000000000000007 /* PairingCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000008 /* PairingCode.swift */; };
@@ -25,6 +29,10 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+        A10000000000000000000014 /* RecordingPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingPlayer.swift; sourceTree = "<group>"; };
+        A10000000000000000000012 /* RollingRecording.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RollingRecording.swift; sourceTree = "<group>"; };
+        A10000000000000000000010 /* RecordingClip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingClip.swift; sourceTree = "<group>"; };
+        A1000000000000000000000E /* RecordingBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingBuffer.swift; sourceTree = "<group>"; };
         A1000000000000000000000C /* SampleVideo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleVideo.swift; sourceTree = "<group>"; };
         A1000000000000000000000A /* SampleTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleTransfer.swift; sourceTree = "<group>"; };
         A10000000000000000000008 /* PairingCode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingCode.swift; sourceTree = "<group>"; };
@@ -76,6 +84,10 @@
 		504EC3061FED79650016851F /* App */ = {
 			isa = PBXGroup;
 			children = (
+                A1000000000000000000000E /* RecordingBuffer.swift */,
+                A10000000000000000000010 /* RecordingClip.swift */,
+                A10000000000000000000012 /* RollingRecording.swift */,
+                A10000000000000000000014 /* RecordingPlayer.swift */,
                 A1000000000000000000000A /* SampleTransfer.swift */,
                 A1000000000000000000000C /* SampleVideo.swift */,
                 A10000000000000000000008 /* PairingCode.swift */,
@@ -175,6 +187,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+                A1000000000000000000000D /* RecordingBuffer.swift in Sources */,
+                A1000000000000000000000F /* RecordingClip.swift in Sources */,
+                A10000000000000000000011 /* RollingRecording.swift in Sources */,
+                A10000000000000000000013 /* RecordingPlayer.swift in Sources */,
                 A10000000000000000000009 /* SampleTransfer.swift in Sources */,
                 A1000000000000000000000B /* SampleVideo.swift in Sources */,
                 A10000000000000000000007 /* PairingCode.swift in Sources */,

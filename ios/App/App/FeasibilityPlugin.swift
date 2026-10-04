@@ -8,6 +8,13 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "FeasibilityPlugin"
     public let jsName = "Feasibility"
     public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "recordingStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "recordingReport", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "startRecording", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopRecording", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "extractRecording", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "playRecordingClip", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "cleanupRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "ping", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "requestCameraPermission", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "generateSessionSecret", returnType: CAPPluginReturnPromise),
@@ -31,10 +38,69 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     private var sampleURL: URL?
     private var sampleInfo: [String: Any] = ["ready": false]
     private var generating = false
+    private let recording = RollingRecording()
+    private var cameraRecording = false
+    private var previousIdleTimer: Bool?
+
+    @objc func recordingStatus(_ call: CAPPluginCall) { recording.status { call.resolve($0) } }
+    @objc func recordingReport(_ call: CAPPluginCall) { recording.report { result in
+        switch result { case .success(let report): call.resolve(["report": report]); case .failure(let error): call.reject(error.localizedDescription) }
+    } }
+    @objc func startRecording(_ call: CAPPluginCall) { DispatchQueue.main.async {
+        guard !self.cameraRecording, !self.generating, !self.requestingScan, self.scanner == nil,
+              self.bridge?.viewController?.presentedViewController == nil, UIApplication.shared.applicationState == .active else {
+            call.reject("Stop capture, close scanning/playback and foreground the app first"); return
+        }
+        guard let retention = call.getValue("retentionSeconds") as? NSNumber, let review = call.getValue("reviewSeconds") as? NSNumber,
+              CFGetTypeID(retention) != CFBooleanGetTypeID(), CFGetTypeID(review) != CFBooleanGetTypeID(),
+              retention.doubleValue.isFinite, review.doubleValue.isFinite,
+              retention.doubleValue.rounded() == retention.doubleValue, review.doubleValue.rounded() == review.doubleValue,
+              (30...180).contains(retention.doubleValue), (5...30).contains(review.doubleValue) else {
+            call.reject("Retention/review must be whole seconds within the experiment bounds"); return
+        }
+        guard let scene = self.bridge?.viewController?.view.window?.windowScene, scene.interfaceOrientation.isLandscape else {
+            call.reject("Hold the phone in landscape before starting (disable orientation lock if needed)"); return
+        }
+        do {
+            let config = try RecordingConfig(retentionSeconds: retention.intValue, reviewSeconds: review.intValue)
+            self.cameraRecording = true; self.previousIdleTimer = UIApplication.shared.isIdleTimerDisabled
+            UIApplication.shared.isIdleTimerDisabled = true
+            let orientation: AVCaptureVideoOrientation = scene.interfaceOrientation == .landscapeLeft ? .landscapeLeft : .landscapeRight
+            self.recording.start(config: config, orientation: orientation) { error in
+                if let error { DispatchQueue.main.async { self.restoreRecordingScreen() }; call.reject(error.localizedDescription) }
+                else { call.resolve() }
+            }
+        } catch { call.reject(error.localizedDescription) }
+    } }
+    @objc func stopRecording(_ call: CAPPluginCall) { recording.stop { call.resolve() } }
+    @objc func extractRecording(_ call: CAPPluginCall) { DispatchQueue.main.async {
+        guard self.bridge?.viewController?.presentedViewController == nil else { call.reject("Close playback before replacing the clip"); return }
+        self.recording.extract { error in if let error { call.reject(error.localizedDescription) } else { call.resolve() } }
+    } }
+    @objc func playRecordingClip(_ call: CAPPluginCall) { recording.completedClip { url in
+        guard let url else { call.reject("No completed recording clip"); return }
+        DispatchQueue.main.async {
+            guard let presenter = self.bridge?.viewController, presenter.presentedViewController == nil,
+                  UIApplication.shared.applicationState == .active else { call.reject("Close playback and foreground the app first"); return }
+            let player = RecordingPlayer(url: url) { error in
+                if let error { call.reject(error) } else { call.resolve() }
+            }
+            presenter.present(player, animated: true)
+        }
+    } }
+    @objc func cleanupRecording(_ call: CAPPluginCall) { DispatchQueue.main.async {
+        guard self.bridge?.viewController?.presentedViewController == nil else { call.reject("Close playback before cleanup"); return }
+        self.recording.cleanup { error in if let error { call.reject(error.localizedDescription) } else { call.resolve() } }
+    } }
+    private func restoreRecordingScreen() {
+        cameraRecording = false
+        if let previousIdleTimer { UIApplication.shared.isIdleTimerDisabled = previousIdleTimer }; previousIdleTimer = nil
+    }
 
     @objc func sampleStatus(_ call: CAPPluginCall) { DispatchQueue.main.async { call.resolve(self.sampleInfo) } }
     @objc func generateSample(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
+            guard !self.cameraRecording else { call.reject("Stop recording before synthetic generation"); return }
             guard !self.generating else { call.reject("Already generating"); return }
             // Reuse the same independent sample for all three timed attempts.
             if self.sampleURL != nil { call.resolve(self.sampleInfo); return }
@@ -96,6 +162,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     }
     @objc func scanPairingQR(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
+            guard !self.cameraRecording else { call.reject("Stop recording before opening the QR camera"); return }
             guard !self.requestingScan, self.scanner == nil else { call.reject("Scanner already open"); return }
             self.requestingScan = true
             AVCaptureDevice.requestAccess(for: .video) { granted in
@@ -119,13 +186,17 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     public override func load() {
+        recording.captureEnded = { [weak self] in DispatchQueue.main.async { self?.restoreRecordingScreen() } }
         backgroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.recording.stop(reason: "App backgrounded/locked; foreground and explicitly start a new experiment")
+            self?.restoreRecordingScreen()
             self?.session.stop(reason: "App backgrounded; foreground and restart/reconnect")
         }
     }
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
         session.stop()
+        recording.stop(reason: "App closed")
     }
     @objc func generateSessionSecret(_ call: CAPPluginCall) { call.resolve(["secret": LocalSession.newSecret()]) }
     private func options(_ call: CAPPluginCall) -> (String, UInt16)? {

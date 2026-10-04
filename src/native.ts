@@ -8,7 +8,7 @@ export interface TransferStatus {
   sha256?: string; checksumVerified: boolean; durationSeconds?: number; throughputMBps?: number; attempts?: TransferStatus[];
 }
 export interface SampleStatus { ready: boolean; bytes?: number; sha256?: string; durationSeconds?: number; }
-// Experiment contract for Android #11 and future iOS #12. Paths/footage stay native.
+// Shared experiment contract for Android #11 and iOS #12. Paths/footage stay native.
 export interface RecordingConfig { retentionSeconds: number; reviewSeconds: number; }
 export interface RecordingClipStatus {
   state: string; ready: boolean; detail?: string; bytes?: number; durationSeconds?: number;
@@ -20,10 +20,11 @@ export interface RecordingStatus extends RecordingConfig {
   state: string; detail: string; elapsedSeconds: number; encodedFrames: number; sensorFrames: number;
   effectiveFps: number; sensorFps: number; maxFrameDeltaMs: number; intervalsOver50ms: number;
   maxSensorDeltaMs: number; sensorIntervalsOver50ms: number; captureFailures: number;
+  droppedInputFrames?: number; droppedEncoderFrames?: number;
   firstPtsUs: number; lastPtsUs: number; bufferedSeconds: number; closedSegments: number; pinnedSegments: number;
   storageBytes: number; peakStorageBytes: number; totalVideoBytesWritten: number; maxStorageBytes: number;
   selection: { width?: number; height?: number; encodedWidth?: number; encodedHeight?: number; requestedFps?: number; aeRange?: string; encoder?: string;
-    rotationDegrees?: number; fallback?: string; supportedSizes?: string[]; supportedFpsRanges?: string[] };
+    rotationDegrees?: number; fallback?: string; sensorMetric?: string; supportedSizes?: string[]; supportedFpsRanges?: string[] };
   extraction: RecordingClipStatus;
 }
 export interface SessionStatus {

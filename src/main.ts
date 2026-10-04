@@ -7,7 +7,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus 
   selector: 'replay-app', standalone: true,
   template: `
     <main>
-      <header><p class="eyebrow">CRICKET REPLAY · P0-05</p><h1>Feasibility harness</h1>
+      <header><p class="eyebrow">CRICKET REPLAY · P0-05 / P0-06</p><h1>Feasibility harness</h1>
         <p>Local experiments on real phones. Players make the decisions.</p></header>
       <section><h2>Phone role</h2><div class="roles">
         <button [disabled]="sessionActive() || networkBusy()" [attr.aria-pressed]="role() === 'host'" (click)="role.set('host')">Host</button>
@@ -109,7 +109,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus 
         }
       </section>
       <section><h2>Rolling camera recording</h2>
-      @if (!recordingSupported) { <p>Camera recording requires Android. iPhone implementation follows in P0-06.</p> } @else {
+      @if (!recordingSupported) { <p>Camera recording requires an installed Android or iPhone app.</p> } @else {
         <p>Hold the phone in landscape. Rear camera, no audio; target 1280×720 at 30 fps. Keep this app foreground. Wi-Fi is optional for recording.</p>
         <label>Retention seconds (30–180)<input type="number" min="30" max="180" step="1" [value]="retentionSeconds()" [disabled]="recordingActive() || recordingBusy()" (input)="retentionSeconds.set(+$any($event.target).value)"></label>
         <label>Review seconds (5–30)<input type="number" min="5" max="30" step="1" [value]="reviewSeconds()" [disabled]="recordingActive() || recordingBusy()" (input)="reviewSeconds.set(+$any($event.target).value)"></label>
@@ -125,14 +125,14 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus 
           <div aria-live="polite"><p [class.error]="r.state === 'failed'">{{ r.state }} · {{ r.detail }}</p>
           <dl><dt>Elapsed / buffered</dt><dd>{{ r.elapsedSeconds.toFixed(1) }} / {{ r.bufferedSeconds.toFixed(1) }} s</dd>
             <dt>Selected capture</dt><dd>{{ r.selection.width ?? '—' }} × {{ r.selection.height ?? '—' }} · AE {{ r.selection.aeRange ?? '—' }} fps</dd>
-            <dt>Measured encoder / sensor fps</dt><dd>{{ r.effectiveFps.toFixed(2) }} / {{ r.sensorFps.toFixed(2) }}</dd>
-            <dt>Encoded / sensor frames</dt><dd>{{ r.encodedFrames }} / {{ r.sensorFrames }}</dd>
+            <dt>Measured encoder / capture input fps</dt><dd>{{ r.effectiveFps.toFixed(2) }} / {{ r.sensorFps.toFixed(2) }}</dd>
+            <dt>Encoded / capture input frames</dt><dd>{{ r.encodedFrames }} / {{ r.sensorFrames }}</dd>
             <dt>Largest encoded interval</dt><dd>{{ r.maxFrameDeltaMs.toFixed(2) }} ms · {{ r.intervalsOver50ms }} intervals above 50 ms</dd>
-            <dt>Largest sensor interval / failed captures</dt><dd>{{ r.maxSensorDeltaMs.toFixed(2) }} ms / {{ r.captureFailures }}</dd>
+            <dt>Largest capture input interval / failures or drops</dt><dd>{{ r.maxSensorDeltaMs.toFixed(2) }} ms / {{ r.captureFailures }}</dd>
             <dt>Storage / peak</dt><dd>{{ (r.storageBytes / 1048576).toFixed(2) }} / {{ (r.peakStorageBytes / 1048576).toFixed(2) }} MiB · cap {{ r.maxStorageBytes / 1048576 }} MiB</dd>
             <dt>Total encoded bytes written</dt><dd>{{ (r.totalVideoBytesWritten / 1048576).toFixed(2) }} MiB</dd>
             <dt>Closed / pinned segments</dt><dd>{{ r.closedSegments }} / {{ r.pinnedSegments }}</dd>
-          </dl><p>{{ r.selection.fallback }}</p>
+          </dl><p>{{ r.selection.fallback }}</p><p>{{ r.selection.sensorMetric }}</p>
           <p [class.error]="r.extraction.state === 'failed'">Extraction: {{ r.extraction.state }} · {{ r.extraction.detail }}</p>
           @if (r.extraction.ready) { <p>{{ r.extraction.durationSeconds?.toFixed(2) }} s · {{ r.extraction.segments }} segments · {{ r.extraction.effectiveFps?.toFixed(2) }} fps · keyframe lead-in {{ r.extraction.leadInSeconds?.toFixed(2) }} s · {{ r.extraction.decodedFrames }} decoded smoke-check frames</p> }
           </div>
@@ -153,7 +153,7 @@ class App implements OnDestroy {
   readonly error = signal('');
   readonly networkSupported = this.native && ['ios', 'android'].includes(this.runtime);
   readonly transferSupported = this.networkSupported;
-  readonly recordingSupported = this.native && this.runtime === 'android';
+  readonly recordingSupported = this.networkSupported;
   readonly recording = signal<RecordingStatus | null>(null);
   readonly recordingBusy = signal(false);
   readonly recordingError = signal('');
