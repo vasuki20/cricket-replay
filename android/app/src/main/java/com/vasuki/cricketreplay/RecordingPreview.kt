@@ -21,7 +21,8 @@ internal class RecordingPreview(private val activity: Activity, private val web:
     private var attached = false
     private var bufferWidth = 1280
     private var bufferHeight = 720
-    private var rotation = 0
+    private var sensorOrientation = 90
+    private var displayRotation = 0
 
     init {
         host.addView(texture)
@@ -72,14 +73,21 @@ internal class RecordingPreview(private val activity: Activity, private val web:
         }
     }
     fun output(): Surface? = surface
-    fun configure(width: Int, height: Int, degrees: Int) {
+    fun configure(width: Int, height: Int, sensorDegrees: Int, displayDegrees: Int) {
         texture.surfaceTexture?.setDefaultBufferSize(width, height)
-        activity.runOnUiThread { bufferWidth = width; bufferHeight = height; rotation = degrees; fit(host.width, host.height) }
+        activity.runOnUiThread {
+            bufferWidth = width; bufferHeight = height
+            sensorOrientation = sensorDegrees; displayRotation = displayDegrees
+            fit(host.width, host.height)
+        }
     }
     private fun fit(width: Int, height: Int) {
-        val scale = min(width.toFloat() / bufferWidth, height.toFloat() / bufferHeight)
-        texture.layoutParams = FrameLayout.LayoutParams((bufferWidth * scale).roundToInt().coerceAtLeast(1), (bufferHeight * scale).roundToInt().coerceAtLeast(1), android.view.Gravity.CENTER)
-        texture.rotation = rotation.toFloat()
+        val currentRotation = web.display?.rotation?.times(90) ?: displayRotation
+        val geometry = previewGeometry(width, height, bufferWidth, bufferHeight, sensorOrientation, currentRotation)
+        texture.layoutParams = FrameLayout.LayoutParams(geometry.width, geometry.height, android.view.Gravity.CENTER)
+        // TextureView already rotates camera buffers into the display's natural orientation.
+        // Rotate the view only for device rotation; never reuse MP4 orientation metadata here.
+        texture.rotation = geometry.rotation
     }
     fun hide() { host.alpha = 0f }
     fun destroy() {
@@ -87,4 +95,16 @@ internal class RecordingPreview(private val activity: Activity, private val web:
         (host.parent as? ViewGroup)?.removeView(host); attached = false
         surface?.release(); surface = null
     }
+}
+
+internal data class PreviewGeometry(val width: Int, val height: Int, val rotation: Float)
+internal fun previewGeometry(width: Int, height: Int, bufferWidth: Int, bufferHeight: Int,
+                             sensorDegrees: Int, displayDegrees: Int): PreviewGeometry {
+    val naturalWidth = if (sensorDegrees % 180 == 0) bufferWidth else bufferHeight
+    val naturalHeight = if (sensorDegrees % 180 == 0) bufferHeight else bufferWidth
+    val uprightWidth = if (displayDegrees % 180 == 0) naturalWidth else naturalHeight
+    val uprightHeight = if (displayDegrees % 180 == 0) naturalHeight else naturalWidth
+    val scale = min(width.toFloat() / uprightWidth, height.toFloat() / uprightHeight)
+    return PreviewGeometry((naturalWidth * scale).roundToInt().coerceAtLeast(1),
+        (naturalHeight * scale).roundToInt().coerceAtLeast(1), -displayDegrees.toFloat())
 }

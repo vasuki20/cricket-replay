@@ -55,3 +55,7 @@ The user confirmed recording starts on iPhone and Android when held sideways. Th
 Preview update verification: Angular build, signed iOS debug build and the macOS synthetic recording suite passed again. Installation succeeded on iPhone 15 and iPhone 15 Pro. No live camera preview or endurance test was run by the agent; preview display/orientation, scrolling, playback recovery and capture performance remain pending physical checks.
 
 The user subsequently reported iPhone works and that repeated preview crashes affect only OnePlus. This is user-reported functional evidence, with no detailed orientation/interval/endurance measurements. The Android container crash fix does not change the installed iPhone build.
+
+## Quick tester scope — 2026-10-06
+
+The user reports iPhone preview is correct; no iPhone code changes accompany the OnePlus orientation fix. The public tester sheet now covers a short offline recording/clip/continued-capture check plus one demonstration-video send per host direction, with simple Works/Problem selections and optional notes. Report copying and numeric measurements are no longer required from the casual tester. The detailed 30-minute and failure-scenario procedures in this document remain follow-up work; no sustained recording acceptance is inferred from the shortened checklist.

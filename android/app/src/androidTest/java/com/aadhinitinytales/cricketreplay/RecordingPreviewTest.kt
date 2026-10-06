@@ -43,7 +43,7 @@ class RecordingPreviewTest {
                         assertTrue(parent.getChildAt(index).layoutParams is CoordinatorLayout.LayoutParams)
                     }
                     val surface = preview.output(); assertNotNull(surface)
-                    preview.configure(640, 480, 180)
+                    preview.configure(640, 480, 90, 270)
                     preview.layout(call(true, -40.0))
                     preview.layout(call(false))
                     assertSame("Hiding must retain the configured camera target", surface, preview.output())

@@ -105,7 +105,7 @@ internal class RollingRecording(private val context: Context, private val captur
     private var epochMs = 0L
 
     fun start(options: RecordingConfig, displayRotation: Int, previewSurface: Surface? = null,
-              configurePreview: ((Int, Int, Int) -> Unit)? = null, done: (Exception?) -> Unit) { handler.post {
+              configurePreview: ((Int, Int, Int, Int) -> Unit)? = null, done: (Exception?) -> Unit) { handler.post {
         if (state in listOf("starting", "recording", "stopping") || extracting) { done(IllegalStateException("Stop recording and finish extraction first")); return@post }
         try {
             check(!destroyed) { "Recording engine closed" }
@@ -153,7 +153,7 @@ internal class RollingRecording(private val context: Context, private val captur
                     ?: previewSizes.filter { it.width <= 1280 && it.height <= 720 }
                         .sortedByDescending { it.width * it.height }.firstOrNull()
                     ?: error("No supported camera preview size")
-                configurePreview?.invoke(previewSize.width, previewSize.height, rotation)
+                configurePreview?.invoke(previewSize.width, previewSize.height, sensorOrientation, displayRotation)
             }
             selection = JSONObject().put("camera", "rear").put("width", size.width).put("height", size.height)
                 .put("requestedFps", range.upper).put("aeRange", "${range.lower}–${range.upper}").put("encoder", encoder)
