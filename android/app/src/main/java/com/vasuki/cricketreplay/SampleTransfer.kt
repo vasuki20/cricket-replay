@@ -48,6 +48,11 @@ internal class SampleTransfer(private val queue: ScheduledExecutorService, priva
     var completed: File? = null; private set
     private var id = ""
     private var total = 0
+    private var window = 1
+    private var chunksSinceAck = 0
+    private var dataMs = 0.0
+    private var verifyMs = 0.0
+    private var hashMs = 0.0
     private var offset = 0
     private var sha = ""
     private var digest = MessageDigest.getInstance("SHA-256")
@@ -72,7 +77,7 @@ internal class SampleTransfer(private val queue: ScheduledExecutorService, priva
         val description = if (media == "recording") detail.replace("sample", "recording clip") else detail
         state = JSONObject().put("state", phase).put("detail", description).put("requestId", id).put("bytes", offset)
             .put("totalBytes", total).put("sha256", sha).put("checksumVerified", phase == "ready" || phase == "complete")
-        state.put("media", media)
+        state.put("media", media).put("windowChunks", window).put("dataMs", dataMs).put("verificationMs", verifyMs).put("hashMs", hashMs)
         recording?.let { state.put("recording", it).put("reviewId", reviewID) }
         if (phase == "ready" || phase == "complete") {
             val seconds = ((System.nanoTime() - started) / 1_000_000_000.0).coerceAtLeast(0.000001)
@@ -111,6 +116,7 @@ internal class SampleTransfer(private val queue: ScheduledExecutorService, priva
         check(!active) { "A transfer is already active" }; clearPartial()
         completed?.let { check(!it.exists() || it.delete()) { "Cannot remove previous sample" } }; completed = null
         check(directory.isDirectory || directory.mkdirs()) { "Cannot create transfer directory" }
+        window = 1; chunksSinceAck = 0; dataMs = 0.0; verifyMs = 0.0; hashMs = 0.0
         offset = 0; digest = MessageDigest.getInstance("SHA-256"); started = System.nanoTime()
     }
     fun begin(file: File, slow: Boolean = false, info: JSONObject? = null, reviewId: String = "") {
@@ -118,11 +124,11 @@ internal class SampleTransfer(private val queue: ScheduledExecutorService, priva
         val metadata = info?.let(::recordingMetadata)
         if (metadata != null) require(SessionAuthentication.validID(reviewId)) { "Invalid review ID" }
         val size = file.length(); require(size in 1..MAX_BYTES.toLong()) { "Sample must be 1–32 MiB" }
-        val checksum = checksum(file); prepare()
+        val hashStart = System.nanoTime(); val checksum = checksum(file); val hashElapsed = (System.nanoTime() - hashStart) / 1_000_000.0; prepare(); hashMs = hashElapsed
         id = UUID.randomUUID().toString(); total = size.toInt(); sha = checksum; sending = true; this.slow = slow
         recording = metadata; media = if (metadata == null) "sample" else "recording"; reviewID = reviewId
         try { handle = RandomAccessFile(file, "r") } catch (error: Exception) { update("failed", "Cannot read sample"); throw error }
-        update("offer", "Waiting for host to accept sample"); send(JSONObject().put("kind", "offer").put("bytes", total).put("sha256", sha).put("media", media).apply {
+        update("offer", "Waiting for host to accept sample"); send(JSONObject().put("kind", "offer").put("windowChunks", if (slow) 1 else 8).put("maxWindowChunks", if (slow) 1 else 32).put("bytes", total).put("sha256", sha).put("media", media).apply {
             recording?.let { put("recording", it).put("reviewId", reviewID) }
         })
     }
@@ -143,24 +149,30 @@ internal class SampleTransfer(private val queue: ScheduledExecutorService, priva
                     recordingMetadata(packet.getJSONObject("recording"))
                 } else null
                 acceptOffer?.invoke(offeredMedia, offeredID)
-                prepare(); recording = metadata; media = offeredMedia; reviewID = offeredID; id = request; total = bytes; sha = hash; sending = false; slow = false
+                prepare(); window = if (packet.optInt("windowChunks", 1) == 8) { if (packet.optInt("maxWindowChunks", 8) == 32) 32 else 8 } else 1; recording = metadata; media = offeredMedia; reviewID = offeredID; id = request; total = bytes; sha = hash; sending = false; slow = false
                 val file = File(directory, "$id.part.mp4"); check(file.createNewFile()) { "Cannot create partial file" }
                 partial = file
                 check(availableBytes(directory) >= total.toLong() + 64 * 1024 * 1024) { "Low storage; review transfer unavailable" }
                 handle = RandomAccessFile(file, "rw")
-                update("receiving", "Receiving encrypted sample"); send(JSONObject().put("kind", "ack").put("offset", 0)); return
+                update("receiving", "Receiving encrypted sample"); send(JSONObject().put("kind", "ack").put("offset", 0).put("windowChunks", window)); return
             }
             require(active && request == id) { "Unexpected transfer/request ID" }
             when (kind) {
                 "ack" -> {
                     require(sending && phase in setOf("offer", "sending") && integer(packet, "offset") == offset) { "Invalid chunk acknowledgement" }
+                    if (phase == "offer") window = if (!slow && packet.optInt("windowChunks", 1) in listOf(8, 32)) packet.getInt("windowChunks") else 1
                     if (offset == total) {
+                        dataMs = (System.nanoTime() - started) / 1_000_000.0
                         handle?.close(); handle = null; update("finishing", "Waiting for host checksum verification")
                         send(JSONObject().put("kind", "end"))
                     } else {
-                        val bytes = ByteArray(minOf(CHUNK_SIZE, total - offset)); checkNotNull(handle).readFully(bytes)
-                        val start = offset; offset += bytes.size; update("sending", "Sending encrypted sample")
-                        send(JSONObject().put("kind", "chunk").put("offset", start).put("data", Base64.encodeToString(bytes, Base64.NO_WRAP)))
+                        repeat(window) {
+                            if (offset < total) {
+                                val bytes = ByteArray(minOf(CHUNK_SIZE, total - offset)); checkNotNull(handle).readFully(bytes)
+                                val start = offset; offset += bytes.size; update("sending", "Sending encrypted sample")
+                                send(JSONObject().put("kind", "chunk").put("offset", start).put("data", Base64.encodeToString(bytes, Base64.NO_WRAP)))
+                            }
+                        }
                     }
                 }
                 "chunk" -> {
@@ -169,15 +181,23 @@ internal class SampleTransfer(private val queue: ScheduledExecutorService, priva
                     val bytes = Base64.decode(encoded, Base64.DEFAULT)
                     require(bytes.isNotEmpty() && bytes.size <= CHUNK_SIZE && offset + bytes.size <= total) { "Invalid chunk size" }
                     checkNotNull(handle).write(bytes); digest.update(bytes); offset += bytes.size
-                    update("receiving", "Receiving encrypted sample"); send(JSONObject().put("kind", "ack").put("offset", offset))
+                    update("receiving", "Receiving encrypted sample")
+                    chunksSinceAck++
+                    if (chunksSinceAck == window || offset == total) {
+                        chunksSinceAck = 0
+                        if (offset == total) dataMs = (System.nanoTime() - started) / 1_000_000.0
+                        send(JSONObject().put("kind", "ack").put("offset", offset))
+                    }
                 }
                 "end" -> {
                     require(!sending && phase == "receiving" && offset == total) { "Incomplete sample" }
+                    val verifyStart = System.nanoTime()
                     val actual = hex(digest.digest()); require(actual == sha) { "Checksum mismatch; partial sample discarded" }
                     checkNotNull(handle).fd.sync(); handle?.close(); handle = null
                     recording?.let { checkNotNull(validateRecording).invoke(checkNotNull(partial), it) }
                     val ready = File(directory, "$id.mp4"); check(checkNotNull(partial).renameTo(ready)) { "Cannot finalize received sample" }
                     partial = null; completed = ready; timer?.cancel(false); timer = null
+                    verifyMs = (System.nanoTime() - verifyStart) / 1_000_000.0
                     update("ready", "Complete sample verified; ready to play")
                     onSend?.invoke(id, JSONObject().put("kind", "complete").put("bytes", total).put("sha256", actual))
                 }

@@ -48,6 +48,24 @@ Current defaults: retention 120 s / review 20 s. Both native implementations val
 
 P2 must measure supported ranges and storage estimates, persist settings locally, define pin expiry and respond to thermal/storage signals. P3 must reconcile supported review duration/bitrate with the clip cap and latency target. Wider user settings must never silently truncate or publish partial footage as ready. Validation tests establish rejection behavior, not sustained hardware capacity.
 
+## FT extension: read-only viewers (build 12)
+
+Added after P0, for the 11 October field trial: one Host owns review requests, one Camera records, and up to four Viewers fetch the latest completed replay. A separate Viewer QR has an independent random secret and listener at the camera port + 1. Each viewer connection owns its authentication, encrypted transfer and snapshot files; viewer traffic cannot invoke camera extraction or End match. Host copies a verified artifact on demand, including during host playback, and viewers apply the existing checksum/metadata/decode gates before opening independent Video/Frames playback. No continuous video, automatic push, replay history, multiple cameras or shared playback position is introduced.
+
+To reuse protocol 2 without changing its cryptographic transcript, the viewer transfer sender uses the legacy wire `camera` direction and the receiving viewer uses `host`; product roles and permissions are enforced by the dedicated listener and separate secret. This is a scoped experiment, not the production role/match-identity protocol required by ADR 02. Native loopback tests cover concurrent viewers and denied End commands; physical three-phone/offline/load checks remain pending in [first-match readiness](../testing/first-match-readiness.md).
+
+## FT extension: bounded transfer bursts (build 15)
+
+Investigation found a 16 KiB stop-and-wait transfer: every chunk incurred another network round trip. Sender and receiver now negotiate eight ordered chunks before acknowledging, limiting raw outstanding data to 128 KiB. Missing capability falls back to the legacy single chunk; encrypted packet format, file cap, ordering and verification gates remain unchanged. This also applies to viewer downloads. The deliberately slow diagnostic mode retains single chunks. Transfer and final verification durations are exposed in Diagnostics.
+
+The encrypted 10 MB controlled benchmark with simulated 20 ms round trips improved from 15.57 s to 2.28 s, with exact-byte verification. Native OnePlus transfer/review regressions passed. These establish the mechanism and compatibility, not real hotspot performance; see [build 15 evidence and pending physical timing](../testing/first-match-readiness.md#build-15-transfer-investigation). Offline versus cloud deployment should be reconsidered using measured extraction, transfer and playback costs rather than treating this round-trip bottleneck as a local-network limit.
+
+## FT extension: latency and background return (build 17)
+
+Both updated peers negotiate 32 chunks (512 KiB raw outstanding); build-15 peers use eight and older peers use one. Native readers process bounded blocks; Android verification retains the same timestamp/decode gates without unused PNG encoding. Clock probes run 80 ms apart, and automatic review proceeds once replies arrive instead of unconditionally waiting 3.5 seconds. Original native tap anchoring and the calibration deadline remain enforced.
+
+Host/viewer sessions and verified replay state are retained on ordinary background/return. Android restores decoder position and play/pause state; frame UI remains mounted, and Back closes fullscreen review. iOS retains and pauses/resumes its player. Camera capture still stops in background; socket failure can require same-match reconnection. This is in-process lifecycle preservation, not persistence/recovery after OS process eviction. See [evidence and remaining physical checks](../testing/first-match-readiness.md#builds-16–17-latency-and-background-return).
+
 ## Official platform references
 
 Existing pipeline choices follow [Camera2 capture sessions](https://developer.android.com/media/camera/camera2/capture-sessions-requests), [MediaMuxer](https://developer.android.com/reference/android/media/MediaMuxer), [Apple dropped-frame guidance](https://developer.apple.com/library/archive/technotes/tn2445/_index.html), [VideoToolbox](https://developer.apple.com/documentation/videotoolbox/vtcompressionsession-api-collection) and [compressed writer inputs](https://developer.apple.com/documentation/avfoundation/avassetwriterinput/outputsettings). These are references already used in the experiments, not new physical evidence or a newly validated pipeline.

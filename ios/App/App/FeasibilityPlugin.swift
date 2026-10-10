@@ -8,6 +8,13 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "FeasibilityPlugin"
     public let jsName = "Feasibility"
     public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "connectViewer", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "fetchViewerReplay", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setFullscreen", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "saveReceivedReview", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "endPeerMatch", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "requestMatchStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "requestMatchReview", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "playReceivedReview", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "inspectReceivedReviewFrame", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "inspectRecordingFrame", returnType: CAPPluginReturnPromise),
@@ -37,6 +44,13 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "playReceivedSample", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cleanupSamples", returnType: CAPPluginReturnPromise)
     ]
+    @objc func setFullscreen(_ call: CAPPluginCall) { DispatchQueue.main.async {
+        if let controller = self.bridge?.viewController as? FeasibilityViewController {
+            controller.fullscreen = call.getBool("enabled") ?? false
+            if !(controller.presentedViewController is RecordingPlayer) { controller.updateOrientationPolicy() }
+        }
+        call.resolve()
+    } }
     private let session = LocalSession(directory: FileManager.default.temporaryDirectory.appendingPathComponent("cricket-transfer"))
     private var backgroundObserver: NSObjectProtocol?
     private var scanner: PairingScanner?
@@ -47,6 +61,31 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     private let recording = RollingRecording()
     private var cameraRecording = false
     private var previousIdleTimer: Bool?
+    private var hosting = false
+    private func updateScreenAwake() {
+        if hosting || cameraRecording {
+            if previousIdleTimer == nil { previousIdleTimer = UIApplication.shared.isIdleTimerDisabled }
+            UIApplication.shared.isIdleTimerDisabled = true
+        } else {
+            if let previousIdleTimer { UIApplication.shared.isIdleTimerDisabled = previousIdleTimer }
+            previousIdleTimer = nil
+        }
+    }
+    private func previewOrientation() -> AVCaptureVideoOrientation {
+        switch UIDevice.current.orientation {
+        case .landscapeLeft: return .landscapeRight
+        case .landscapeRight: return .landscapeLeft
+        case .portrait: return .portrait
+        case .portraitUpsideDown: return .portraitUpsideDown
+        default:
+            switch bridge?.viewController?.view.window?.windowScene?.interfaceOrientation {
+            case .landscapeLeft: return .landscapeLeft
+            case .landscapeRight: return .landscapeRight
+            case .portraitUpsideDown: return .portraitUpsideDown
+            default: return .portrait
+            }
+        }
+    }
     private var inspectingFrame = false
     private var preparingRemoteReview = false
     private let frameWorker = DispatchQueue(label: "cricket.frame-inspector")
@@ -92,10 +131,30 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
                                       width: CGFloat(width) * scale, height: CGFloat(height) * scale), to: container)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         preview.frame = frame; preview.isHidden = !visible
+        if call.getBool("fullscreen") == true {
+            web.isOpaque = false; web.backgroundColor = .clear; web.scrollView.backgroundColor = .clear
+            parent.insertSubview(container, belowSubview: web)
+        } else { parent.bringSubviewToFront(container) }
+        if let connection = preview.previewLayer.connection, connection.isVideoOrientationSupported {
+            let orientation = self.previewOrientation()
+            connection.videoOrientation = orientation
+            self.recording.updateOrientation(orientation)
+        }
         CATransaction.commit()
         call.resolve()
     } }
 
+    private var matchReviewPreparing = false
+    @objc func requestMatchReview(_ call: CAPPluginCall) { DispatchQueue.main.async {
+        guard !self.matchReviewPreparing else { call.reject("A replay is already being prepared"); return }
+        self.matchReviewPreparing = true
+        self.session.requestMatchReview { error in
+            DispatchQueue.main.async { self.matchReviewPreparing = false }
+            if let error { call.reject(error.localizedDescription) } else { call.resolve() }
+        }
+    } }
+    @objc func endPeerMatch(_ call: CAPPluginCall) { session.endPeerMatch { ok in call.resolve(["acknowledged": ok]) } }
+    @objc func requestMatchStatus(_ call: CAPPluginCall) { session.requestMatchStatus { _ in call.resolve() } }
     @objc func measureReviewClock(_ call: CAPPluginCall) { session.measureClock(); call.resolve() }
     @objc func requestTimedReview(_ call: CAPPluginCall) {
         let delay = call.getInt("delayMs") ?? 0
@@ -117,14 +176,10 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
               (30...180).contains(retention.doubleValue), (5...30).contains(review.doubleValue) else {
             call.reject("Retention/review must be whole seconds within the experiment bounds"); return
         }
-        guard let scene = self.bridge?.viewController?.view.window?.windowScene, scene.interfaceOrientation.isLandscape else {
-            call.reject("Hold the phone in landscape before starting (disable orientation lock if needed)"); return
-        }
         do {
             let config = try RecordingConfig(retentionSeconds: retention.intValue, reviewSeconds: review.intValue)
-            self.cameraRecording = true; self.previousIdleTimer = UIApplication.shared.isIdleTimerDisabled
-            UIApplication.shared.isIdleTimerDisabled = true
-            let orientation: AVCaptureVideoOrientation = scene.interfaceOrientation == .landscapeLeft ? .landscapeLeft : .landscapeRight
+            self.cameraRecording = true; self.updateScreenAwake()
+            let orientation = self.previewOrientation()
             self.recording.start(config: config, orientation: orientation, preview: self.recordingPreview?.previewLayer) { error in
                 if let error { DispatchQueue.main.async { self.restoreRecordingScreen() }; call.reject(error.localizedDescription) }
                 else { call.resolve() }
@@ -156,7 +211,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     private func restoreRecordingScreen() {
         cameraRecording = false
         recordingPreview?.isHidden = true
-        if let previousIdleTimer { UIApplication.shared.isIdleTimerDisabled = previousIdleTimer }; previousIdleTimer = nil
+        updateScreenAwake()
     }
 
     @objc func inspectReceivedReviewFrame(_ call: CAPPluginCall) { DispatchQueue.main.async {
@@ -179,6 +234,27 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
             }
         } }
     } }
+    @objc func saveReceivedReview(_ call: CAPPluginCall) {
+        session.acquireReview { url, _ in
+            guard let url else { call.reject("Close playback and wait for a verified replay"); return }
+            self.frameWorker.async {
+                do {
+                    let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("saved-replays")
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    let saved = folder.appendingPathComponent("replay-" + UUID().uuidString + ".mp4")
+                    do { try FileManager.default.copyItem(at: url, to: saved) } catch { try? FileManager.default.removeItem(at: saved); throw error }
+                    self.session.releaseMedia()
+                    DispatchQueue.main.async {
+                        guard let presenter = self.bridge?.viewController, presenter.presentedViewController == nil else { call.reject("Replay saved in this app. Close playback before sharing."); return }
+                        let share = UIActivityViewController(activityItems: [saved], applicationActivities: nil)
+                        share.popoverPresentationController?.sourceView = presenter.view
+                        share.popoverPresentationController?.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 1, height: 1)
+                        presenter.present(share, animated: true); call.resolve()
+                    }
+                } catch { self.session.releaseMedia(); call.reject(error.localizedDescription) }
+            }
+        }
+    }
     @objc func playReceivedReview(_ call: CAPPluginCall) { DispatchQueue.main.async {
         let rate = Float(call.getDouble("rate") ?? 1)
         guard [Float(1), 0.5, 0.25].contains(rate), !self.inspectingFrame,
@@ -187,7 +263,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
         self.session.acquireReview { url, _ in DispatchQueue.main.async {
             guard let url else { call.reject("No complete, verified host recording review"); return }
             guard presenter.presentedViewController == nil, UIApplication.shared.applicationState == .active else { self.session.releaseMedia(); call.reject("Return to the app before playback"); return }
-            let player = RecordingPlayer(url: url, rate: rate, closed: { self.session.releaseMedia() }) { error in
+            let player = RecordingPlayer(url: url, rate: rate, closed: { self.session.releaseMedia() }, frames: { self.notifyListeners("reviewFrames", data: [:]) }) { error in
                 if let error { call.reject(error) } else { self.session.reviewPlaybackStarted(); call.resolve() }
             }
             presenter.present(player, animated: true)
@@ -284,6 +360,16 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     public override func load() {
+        session.onEndMatch = { done in DispatchQueue.main.async {
+            guard !self.inspectingFrame, !self.preparingRemoteReview, self.bridge?.viewController?.presentedViewController == nil else { done(RecordingError.invalid("Close playback and finish replay first")); return }
+            self.hosting = false; self.updateScreenAwake()
+            self.recording.stop { self.recording.cleanup { error in
+                if let error { done(error) } else { self.session.cleanupTransfer(done) }
+            } }
+        } }
+        session.matchStatus = { done in self.recording.status { state in
+            done(["state": state["state"] ?? "idle", "elapsedSeconds": state["elapsedSeconds"] ?? 0, "bufferedSeconds": state["bufferedSeconds"] ?? 0, "retentionSeconds": state["retentionSeconds"] ?? 120, "reviewSeconds": state["reviewSeconds"] ?? 20])
+        } }
         session.onReviewCancelled = { [weak self] in DispatchQueue.main.async { self?.preparingRemoteReview = false } }
         session.exportReview = { [weak self] done in
             guard let self else { done(.failure(RecordingError.invalid("Camera unavailable"))); return }
@@ -304,6 +390,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
                 }
             }
         }
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
         recording.captureEnded = { [weak self] in DispatchQueue.main.async { self?.restoreRecordingScreen() } }
         backgroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
@@ -317,7 +404,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
                 }
             }
             self.restoreRecordingScreen()
-            self.session.stop(reason: "App backgrounded; foreground and restart/reconnect")
+            // Preserve pairing and verified reviews; reconnect if suspension breaks the socket.
         }
     }
     deinit {
@@ -335,10 +422,22 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     }
     @objc func startHost(_ call: CAPPluginCall) {
         guard let (secret, port) = options(call) else { return }
+        let viewerSecret = call.getString("viewerSecret")
         session.startHost(secret: secret, port: port) { error in
-            if let error { call.reject(error.localizedDescription) } else { call.resolve() }
+            func finish(_ failure: Error?) { DispatchQueue.main.async {
+                self.hosting = failure == nil; self.updateScreenAwake()
+                if let failure { self.session.stop(); call.reject(failure.localizedDescription) } else { call.resolve() }
+            } }
+            if error != nil || viewerSecret == nil { finish(error) }
+            else if !LocalSession.validSecret(viewerSecret!) || viewerSecret == secret || port == UInt16.max { finish(TransferError.invalid("Invalid viewer pairing")) }
+            else { self.session.startViewers(secret: viewerSecret!, port: port + 1, done: finish) }
         }
     }
+    @objc func connectViewer(_ call: CAPPluginCall) {
+        guard let (secret, port) = options(call), let address = call.getString("address"), PairingCode.validAddress(address) else { call.reject("Use a local Wi-Fi address"); return }
+        session.connect(address: address, secret: secret, port: port, viewer: true); call.resolve()
+    }
+    @objc func fetchViewerReplay(_ call: CAPPluginCall) { session.fetchPublished { error in if let error { call.reject(error.localizedDescription) } else { call.resolve() } } }
     @objc func connectCamera(_ call: CAPPluginCall) {
         guard let (secret, port) = options(call) else { return }
         guard let address = call.getString("address") else { call.reject("Enter the host IPv4 address"); return }
@@ -353,7 +452,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
             if sent { call.resolve() } else { call.reject("Connect and authenticate first; at most four requests may be outstanding") }
         }
     }
-    @objc func stopSession(_ call: CAPPluginCall) { session.stop(); call.resolve() }
+    @objc func stopSession(_ call: CAPPluginCall) { DispatchQueue.main.async { self.hosting = false; self.updateScreenAwake(); self.session.stop(); call.resolve() } }
 
     private func diagnostics() -> [String: Any] {
         let permission: String
@@ -394,6 +493,15 @@ private final class RecordingPreviewView: UIView {
 
 @objc(FeasibilityViewController)
 class FeasibilityViewController: CAPBridgeViewController {
+    var fullscreen = false
+    func updateOrientationPolicy() {
+        if #available(iOS 16.0, *) {
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+            view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: fullscreen ? .allButUpsideDown : .portrait))
+        } else { UIViewController.attemptRotationToDeviceOrientation() }
+    }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { fullscreen ? .allButUpsideDown : .portrait }
+
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(FeasibilityPlugin())
     }

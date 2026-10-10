@@ -1,5 +1,5 @@
 {
-  "name": "cricket-replay", "version": "0.1.0", "private": true,
+  "name": "cricket-replay", "version": "0.1.1", "private": true,
   "scripts": {
     "start": "ng serve --host 127.0.0.1", "build": "ng build",
     "sync:ios": "npm run build && cap sync ios", "open:ios": "cap open ios",

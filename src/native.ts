@@ -1,4 +1,4 @@
-import { registerPlugin } from '@capacitor/core';
+import { PluginListenerHandle, registerPlugin } from '@capacitor/core';
 export interface Diagnostics {
   platform: 'ios' | 'android'; appVersion: string; osVersion: string;
   cameraPermission: string;
@@ -9,6 +9,7 @@ export interface ReviewClipMetadata extends RecordingConfig {
 }
 export interface TransferStatus {
   media?: "sample" | "recording"; reviewId?: string; recording?: ReviewClipMetadata;
+  windowChunks?: number; dataMs?: number; verificationMs?: number; hashMs?: number;
   state: string; detail?: string; requestId?: string; bytes: number; totalBytes: number;
   sha256?: string; checksumVerified: boolean; durationSeconds?: number; throughputMBps?: number; attempts?: TransferStatus[];
 }
@@ -16,7 +17,7 @@ export interface SampleStatus { ready: boolean; bytes?: number; sha256?: string;
 // Shared recording/review experiment contract. Files stay native; decoded stills cross the local bridge.
 export interface RecordingConfig { retentionSeconds: number; reviewSeconds: number; }
 // CSS viewport coordinates. Native preview stays attached while hidden/offscreen; no capture restart.
-export interface RecordingPreviewBounds { x: number; y: number; width: number; height: number; viewportWidth: number; visible: boolean; }
+export interface RecordingPreviewBounds { x: number; y: number; width: number; height: number; viewportWidth: number; visible: boolean; fullscreen?: boolean; }
 export interface RecordingClipStatus {
   state: string; ready: boolean; detail?: string; bytes?: number; durationSeconds?: number;
   frames?: number; effectiveFps?: number; segments?: number; leadInSeconds?: number;
@@ -36,6 +37,8 @@ export interface RecordingStatus extends RecordingConfig {
 }
 export interface RecordedFrame { index: number; frameCount: number; timestampUs: number; sourceTimestampUs?: number; width: number; height: number; pngBase64: string; }
 export interface SessionStatus {
+  hasPlayableReview?: boolean;
+  peerRecording?: { state: string; elapsedSeconds: number; bufferedSeconds?: number; retentionSeconds?: number; reviewSeconds: number };
   clock?: { samples: number; offsetUs: number; uncertaintyUs: number; measuredAtUs: number };
   review?: { requestId?: string; verifiedElapsedMs?: number; tapToPlayMs?: number; state?: string; ok?: boolean; detail?: string; tapUs?: number; peerTapUs?: number; uncertaintyUs?: number; injectedDelayMs?: number; replyElapsedMs?: number };
   transfer?: TransferStatus;
@@ -44,6 +47,14 @@ export interface SessionStatus {
   lastRoundTripMs?: number;
 }
 export const Feasibility = registerPlugin<{
+  setFullscreen(options: { enabled: boolean }): Promise<void>;
+  addListener(event: 'reviewFrames', listener: () => void): Promise<PluginListenerHandle>;
+  connectViewer(options: { address: string; secret: string; port: number }): Promise<void>;
+  fetchViewerReplay(): Promise<void>;
+  saveReceivedReview(): Promise<void>;
+  endPeerMatch(): Promise<{ acknowledged: boolean }>;
+  requestMatchStatus(): Promise<void>;
+  requestMatchReview(): Promise<void>;
   playReceivedReview(options: { rate: number }): Promise<void>;
   inspectReceivedReviewFrame(options: { index: number }): Promise<RecordedFrame>;
   measureReviewClock(): Promise<void>;
@@ -65,7 +76,7 @@ export const Feasibility = registerPlugin<{
   ping(): Promise<Diagnostics>;
   requestCameraPermission(): Promise<Diagnostics>;
   generateSessionSecret(): Promise<{ secret: string }>;
-  startHost(options: { secret: string; port: number }): Promise<void>;
+  startHost(options: { secret: string; port: number; viewerSecret?: string }): Promise<void>;
   connectCamera(options: { address: string; secret: string; port: number }): Promise<void>;
   sessionStatus(): Promise<SessionStatus>;
   sendSessionPing(options: { status: boolean }): Promise<void>;

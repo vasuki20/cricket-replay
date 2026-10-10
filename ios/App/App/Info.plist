@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Connect nearby phones for offline cricket replay connection tests.</string>
+    <string>Connect nearby phones to share cricket replays.</string>
     <key>NSCameraUsageDescription</key>
-    <string>Test camera access for offline cricket replay experiments.</string>
+    <string>Record cricket footage for instant replays.</string>
   <key>CAPACITOR_DEBUG</key>
 	<string>$(CAPACITOR_DEBUG)</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-        <string>Replay Feasibility</string>
+        <string>One More Look</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

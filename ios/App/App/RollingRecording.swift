@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import VideoToolbox
+import CoreImage
 
 // One capture session and compression session per run; MP4 writers only wrap compressed samples.
 final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -20,6 +21,8 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     #endif
     private var device: AVCaptureDevice?
     private var compression: VTCompressionSession?
+    private let normalizer = RecordingFrameNormalizer()
+    private var frameOrientation: Int32 = 1
     private var observers: [NSObjectProtocol] = []
     private var timer: DispatchSourceTimer?
     private var writer: AVAssetWriter?
@@ -122,6 +125,17 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     }
 
     #if os(iOS)
+    func updateOrientation(_ orientation: AVCaptureVideoOrientation) {
+        queue.async { self.frameOrientation = Self.exifOrientation(orientation) }
+    }
+    private static func exifOrientation(_ orientation: AVCaptureVideoOrientation) -> Int32 {
+        switch orientation {
+        case .landscapeLeft: return 3
+        case .portrait: return 6
+        case .portraitUpsideDown: return 8
+        default: return 1
+        }
+    }
     func start(config options: RecordingConfig, orientation: AVCaptureVideoOrientation,
                preview: AVCaptureVideoPreviewLayer? = nil, done: @escaping (Error?) -> Void) {
         queue.async {
@@ -130,8 +144,8 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             }
             do {
                 guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { throw RecordingError.invalid("Camera access denied or not requested. Enable Camera in Settings.") }
-                guard [.landscapeLeft, .landscapeRight].contains(orientation) else { throw RecordingError.invalid("Hold the phone in landscape before starting") }
                 try self.prepare(options, done: done)
+                self.frameOrientation = Self.exifOrientation(orientation)
                 guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else { throw RecordingError.invalid("Rear camera unavailable") }
                 let candidates: [(Int32, Int32)] = [(1280, 720), (640, 480)]
                 var selected: (AVCaptureDevice.Format, Int32)?
@@ -172,8 +186,9 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                 output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: pixel]
                 output.setSampleBufferDelegate(self, queue: self.queue)
                 guard capture.canAddOutput(output) else { throw RecordingError.invalid("Cannot add video sample output") }; capture.addOutput(output)
-                guard let connection = output.connection(with: .video), connection.isVideoOrientationSupported else { throw RecordingError.invalid("Landscape capture unavailable") }
-                connection.videoOrientation = orientation
+                guard let connection = output.connection(with: .video), connection.isVideoOrientationSupported else { throw RecordingError.invalid("Camera orientation unavailable") }
+                // Keep encoder dimensions stable; normalize physical orientation before encoding.
+                connection.videoOrientation = .landscapeRight
                 if connection.isVideoMirroringSupported { connection.automaticallyAdjustsVideoMirroring = false; connection.isVideoMirrored = false }
                 let size = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
                 self.selection = ["camera": "rear", "device": device.modelID, "width": size.width, "height": size.height,
@@ -223,15 +238,15 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private func encodeInput(_ sample: CMSampleBuffer) {
         guard state == "starting" || state == "recording" else { return }
         do {
-            guard let image = CMSampleBufferGetImageBuffer(sample) else { throw RecordingError.invalid("Missing camera image") }
+            guard let cameraImage = CMSampleBufferGetImageBuffer(sample) else { throw RecordingError.invalid("Missing camera image") }
             let pts = CMSampleBufferGetPresentationTimeStamp(sample); let us = RecordingMedia.microseconds(pts)
             guard lastInput < 0 || us > lastInput else { throw RecordingError.invalid("Non-monotonic capture timestamps") }
             if firstInput < 0 { firstInput = us }
             let delta = lastInput < 0 ? 0 : us - lastInput
             maxInputDelta = max(maxInputDelta, delta); if delta > 50_000 { inputGaps += 1 }
             lastInput = us; inputFrames += 1; try log("input", us, "\(delta)")
+            let image = try normalizer.render(cameraImage, orientation: frameOrientation)
             let width = Int32(CVPixelBufferGetWidth(image)), height = Int32(CVPixelBufferGetHeight(image))
-            guard width >= height else { throw RecordingError.invalid("Capture output is not landscape") }
             if compression == nil { try createEncoder(width: width, height: height) }
             guard inFlight < 16, let compression else { throw RecordingError.invalid("Encoder backlog exceeded sixteen frames; recording stopped") }
             inFlight += 1
@@ -297,7 +312,7 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         lastPts = pts; encodedFrames += 1; active.lastUs = pts; active.frames += 1
         totalVideoBytes += CMSampleBufferGetTotalSampleSize(sample); lastSampleWall = ProcessInfo.processInfo.systemUptime
         try buffer.evict(latestUs: pts)
-        if state == "starting" { state = "recording"; detail = "Continuous rear-camera capture; keep landscape and foreground"; startDone?(nil); startDone = nil }
+        if state == "starting" { state = "recording"; detail = "Continuous rear-camera capture; keep the app foreground"; startDone?(nil); startDone = nil }
         if pts - active.firstUs >= Self.segmentUs { forceSync = true }
         guard pts - active.firstUs < 10_000_000 else { throw RecordingError.invalid("No segment keyframe within ten seconds") }
     }
@@ -512,4 +527,34 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         self.stopDone.append(done); self.stopOnQueue("Fixture interruption", interrupted: interrupted)
     } }
     #endif
+}
+
+// Upright frames share one landscape canvas, so turning the camera cannot change MP4 dimensions.
+// Portrait capture is fitted inside the canvas without cropping; landscape capture fills it.
+final class RecordingFrameNormalizer {
+    private let context = CIContext(options: [.cacheIntermediates: false])
+    private var pool: CVPixelBufferPool?
+    private var size = CGSize.zero
+    func render(_ source: CVPixelBuffer, orientation: Int32) throws -> CVPixelBuffer {
+        let width = CVPixelBufferGetWidth(source), height = CVPixelBufferGetHeight(source)
+        let dimensions = CGSize(width: width, height: height)
+        if pool == nil || size != dimensions {
+            size = dimensions
+            let attributes: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
+            guard CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &pool) == kCVReturnSuccess else { throw RecordingError.invalid("Cannot allocate upright recording frames") }
+        }
+        var output: CVPixelBuffer?
+        guard let pool, CVPixelBufferPoolCreatePixelBuffer(nil, pool, &output) == kCVReturnSuccess, let output else { throw RecordingError.invalid("Cannot allocate upright recording frame") }
+        let image = CIImage(cvPixelBuffer: source).oriented(forExifOrientation: orientation)
+        let scale = min(CGFloat(width) / image.extent.width, CGFloat(height) / image.extent.height)
+        let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let centered = scaled.transformed(by: CGAffineTransform(translationX: (CGFloat(width) - scaled.extent.width) / 2 - scaled.extent.minX,
+                                                               y: (CGFloat(height) - scaled.extent.height) / 2 - scaled.extent.minY))
+        let bounds = CGRect(origin: .zero, size: dimensions)
+        let canvas = centered.composited(over: CIImage(color: .black).cropped(to: bounds))
+        context.render(canvas, to: output, bounds: bounds, colorSpace: CGColorSpaceCreateDeviceRGB())
+        return output
+    }
 }

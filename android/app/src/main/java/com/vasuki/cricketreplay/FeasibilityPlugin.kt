@@ -32,6 +32,11 @@ import org.json.JSONObject
 ])
 class FeasibilityPlugin : Plugin() {
     private val recordingPreview by lazy { RecordingPreview(activity, bridge.webView) }
+    @PluginMethod fun setFullscreen(call: PluginCall) { activity.runOnUiThread {
+        if (player != null) { call.resolve(); return@runOnUiThread }
+        activity.requestedOrientation = if (call.getBoolean("enabled", false) == true) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        call.resolve()
+    } }
     @PluginMethod fun setRecordingPreview(call: PluginCall) { activity.runOnUiThread { recordingPreview.layout(call) } }
     private var inspectingFrame = false
     private var preparingRemoteReview = false
@@ -60,6 +65,28 @@ class FeasibilityPlugin : Plugin() {
             finally { if (file != null) session.releaseMedia() }
         } }
     } }
+    @PluginMethod fun saveReceivedReview(call: PluginCall) {
+        session.acquireReview { file, _ ->
+            if (file == null) { call.reject("Close playback and wait for a verified replay"); return@acquireReview }
+            frameWorker.execute {
+                try {
+                    val folder = java.io.File(context.filesDir, "saved-replays"); check(folder.isDirectory || folder.mkdirs())
+                    val saved = java.io.File(folder, "replay-${java.util.UUID.randomUUID()}.mp4")
+                    try { file.copyTo(saved) } catch (error: Exception) { saved.delete(); throw error }
+                    activity.runOnUiThread {
+                        try {
+                            val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", saved)
+                            val intent = android.content.Intent(android.content.Intent.ACTION_SEND).setType("video/mp4")
+                                .putExtra(android.content.Intent.EXTRA_STREAM, uri).addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            activity.startActivity(android.content.Intent.createChooser(intent, "Save or share replay"))
+                            call.resolve()
+                        } catch (error: Exception) { call.reject("Replay saved in this app; sharing unavailable: ${error.message}") }
+                    }
+                } catch (error: Exception) { call.reject(error.message ?: "Could not save replay") }
+                finally { session.releaseMedia() }
+            }
+        }
+    }
     @PluginMethod fun playReceivedReview(call: PluginCall) { activity.runOnUiThread {
         val rate = (call.getDouble("rate", 1.0) ?: 1.0).toFloat()
         if (rate !in listOf(1f, 0.5f, 0.25f) || player != null || inspectingFrame || activity.isFinishing || activity.isDestroyed) { call.reject("Close playback/inspection and foreground the app first"); return@runOnUiThread }
@@ -69,15 +96,27 @@ class FeasibilityPlugin : Plugin() {
             try {
                 player = SamplePlayer(activity, file, { error ->
                     if (error == null) { session.reviewPlaybackStarted(); call.resolve() } else call.reject(error)
-                }, { player = null; session.releaseMedia() }, rate)
+                }, { player = null; session.releaseMedia() }, rate, { notifyListeners("reviewFrames", JSObject()) })
             } catch (error: Exception) { player = null; session.releaseMedia(); call.reject(error.message ?: "Cannot open host review playback") }
         } }
     } }
+    private var hosting = false
+    private fun updateScreenAwake() {
+        if (hosting || cameraRecording) activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
     private var cameraRecording = false // UI thread owns scanner/generator/camera resource exclusion.
     private val recording by lazy { RollingRecording(context) {
-        activity.runOnUiThread { cameraRecording = false; recordingPreview.hide(); activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+        activity.runOnUiThread { cameraRecording = false; recordingPreview.hide(); updateScreenAwake() }
     } }
     override fun load() {
+        session.onEndMatch = { done -> activity.runOnUiThread {
+            if (player != null || inspectingFrame || preparingRemoteReview) done(IllegalStateException("Close playback and finish replay first"))
+            else { hosting = false; updateScreenAwake(); recording.stop { recording.cleanup { error ->
+                if (error != null) done(error) else session.cleanupTransfer(done)
+            } } }
+        } }
+        session.matchStatus = { done -> recording.status { state -> done(JSONObject().put("state", state.getString("state")).put("elapsedSeconds", state.getDouble("elapsedSeconds")).put("bufferedSeconds", state.getDouble("bufferedSeconds")).put("retentionSeconds", state.getInt("retentionSeconds")).put("reviewSeconds", state.getInt("reviewSeconds"))) } }
         session.onReviewCancelled = { activity.runOnUiThread { preparingRemoteReview = false } }
         session.exportReview = { done -> recording.exportReview { file, info, error ->
             activity.runOnUiThread { preparingRemoteReview = false }; done(file, info, error)
@@ -94,6 +133,17 @@ class FeasibilityPlugin : Plugin() {
             }
         } }
     }
+    private var matchReviewPreparing = false
+    @PluginMethod fun requestMatchReview(call: PluginCall) { activity.runOnUiThread {
+        if (matchReviewPreparing) { call.reject("A replay is already being prepared"); return@runOnUiThread }
+        matchReviewPreparing = true
+        session.requestMatchReview { error ->
+            activity.runOnUiThread { matchReviewPreparing = false }
+            if (error == null) call.resolve() else call.reject(error.message ?: "Replay unavailable; reconnect and retry")
+        }
+    } }
+    @PluginMethod fun endPeerMatch(call: PluginCall) { session.endPeerMatch { ok -> call.resolve(JSObject().put("acknowledged", ok)) } }
+    @PluginMethod fun requestMatchStatus(call: PluginCall) { session.requestMatchStatus { call.resolve() } }
     @PluginMethod fun measureReviewClock(call: PluginCall) { session.measureClock(); call.resolve() }
     @PluginMethod fun requestTimedReview(call: PluginCall) {
         session.requestReview(call.getInt("delayMs", 0) ?: 0) { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Review unavailable") }
@@ -117,12 +167,12 @@ class FeasibilityPlugin : Plugin() {
             val previewSurface = recordingPreview.output() ?: error("Live camera preview is not ready; try again")
             cameraRecording = true; activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             recording.start(config, rotation, previewSurface, recordingPreview::configure) { error ->
-                if (error == null) call.resolve() else { activity.runOnUiThread { cameraRecording = false; activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }; call.reject(error.message ?: "Cannot start recording") }
+                if (error == null) call.resolve() else { activity.runOnUiThread { cameraRecording = false; updateScreenAwake() }; call.reject(error.message ?: "Cannot start recording") }
             }
         } catch (error: Exception) { call.reject(error.message ?: "Invalid recording configuration") }
     } }
     @PluginMethod fun stopRecording(call: PluginCall) { recording.stop { activity.runOnUiThread {
-        activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); call.resolve()
+        updateScreenAwake(); call.resolve()
     } } }
     @PluginMethod fun extractRecording(call: PluginCall) { activity.runOnUiThread {
         if (player != null || inspectingFrame || preparingRemoteReview) { call.reject("Close frame inspection/playback before replacing the clip"); return@runOnUiThread }
@@ -167,8 +217,21 @@ class FeasibilityPlugin : Plugin() {
     @PluginMethod fun generateSessionSecret(call: PluginCall) { call.resolve(JSObject().put("secret", PairingCode.newSecret())) }
     @PluginMethod fun startHost(call: PluginCall) {
         val (secret, port) = options(call) ?: return
-        session.startHost(secret, port) { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Host failed") }
+        val viewerSecret = call.getString("viewerSecret")
+        session.startHost(secret, port) { error ->
+            fun finish(failure: Exception?) { activity.runOnUiThread { hosting = failure == null; updateScreenAwake(); if (failure == null) call.resolve() else { session.stop(); call.reject(failure.message ?: "Host failed") } } }
+            if (error != null || viewerSecret == null) finish(error)
+            else if (!PairingCode.validSecret(viewerSecret) || viewerSecret == secret || port >= 65535) finish(IllegalArgumentException("Invalid viewer pairing"))
+            else session.startViewers(viewerSecret, port + 1, ::finish)
+        }
     }
+    @PluginMethod fun connectViewer(call: PluginCall) {
+        val (secret, port) = options(call) ?: return
+        val address = call.getString("address") ?: ""
+        if (!PairingCode.validAddress(address)) { call.reject("Use a local Wi-Fi address"); return }
+        session.connect(address, secret, port, viewer = true); call.resolve()
+    }
+    @PluginMethod fun fetchViewerReplay(call: PluginCall) { session.fetchPublished { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Replay unavailable") } }
     @PluginMethod fun connectCamera(call: PluginCall) {
         val (secret, port) = options(call) ?: return
         val address = call.getString("address") ?: ""
@@ -181,7 +244,7 @@ class FeasibilityPlugin : Plugin() {
             if (sent) call.resolve() else call.reject("Connect and authenticate first; at most four requests may be outstanding")
         }
     }
-    @PluginMethod fun stopSession(call: PluginCall) { session.stop { call.resolve() } }
+    @PluginMethod fun stopSession(call: PluginCall) { activity.runOnUiThread { hosting = false; updateScreenAwake(); session.stop { call.resolve() } } }
     @PluginMethod fun createPairingQR(call: PluginCall) {
         val (secret, port) = options(call) ?: return
         val address = call.getString("address") ?: ""
@@ -276,10 +339,13 @@ class FeasibilityPlugin : Plugin() {
         } }
     } }
     override fun handleOnStop() {
+        cameraRecording = false
         recording.stop("App backgrounded; recording stopped. Foreground and start a new experiment.")
-        activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        player?.dismiss(); session.stop("App backgrounded; foreground and restart/reconnect")
+        updateScreenAwake()
+        player?.background()
+        // Keep the listener, verified review and fullscreen screen across Home.
     }
+    override fun handleOnResume() { player?.foreground() }
     override fun handleOnDestroy() { destroyed = true; recording.destroy(); recordingPreview.destroy(); player?.dismiss(); session.destroy(); generator.shutdownNow(); frameWorker.shutdown() }
     private fun diagnostics(): JSObject = JSObject().apply {
         put("platform", "android")

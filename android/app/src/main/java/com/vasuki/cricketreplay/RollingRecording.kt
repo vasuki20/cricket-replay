@@ -147,7 +147,6 @@ internal class RollingRecording(private val context: Context, private val captur
             val (size, range, encoder) = selected ?: error("No supported rear-camera/AVC combination at 720p or 640×480, 15–30 fps")
             val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
             rotation = (sensorOrientation - displayRotation + 360) % 360
-            check(rotation == 0 || rotation == 180) { "Hold the phone in landscape before starting" }
             preview = previewSurface
             if (preview != null) {
                 val previewSizes = map.getOutputSizes(android.graphics.SurfaceTexture::class.java)?.toList().orEmpty()

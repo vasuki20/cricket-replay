@@ -1,4 +1,4 @@
-import { Component, OnDestroy, signal } from '@angular/core';
+import { Component, OnDestroy, effect, signal } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { Capacitor } from '@capacitor/core';
 import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus, RecordedFrame } from './native';
@@ -6,8 +6,78 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
 @Component({
   selector: 'replay-app', standalone: true,
   template: `
-    <main>
-      <header><p class="eyebrow">CRICKET REPLAY · P0-08</p><h1>Feasibility harness</h1>
+    <main [class.welcome]="!matchRoleChosen() && !diagnosticsMode()">
+      @if (cameraFullScreen()) {
+        <div class="camera-stage" [class.camera-stopped]="!recordingActive() && !recordingStarting()" role="dialog" aria-label="Camera" (click)="toggleCameraControls()">
+          <div class="camera-stage-bar camera-top" [hidden]="!cameraControlsVisible()" (click)="$event.stopPropagation(); showCameraControls()"><button [disabled]="networkBusy() || recordingBusy()" (click)="endMatch()">End</button><p aria-live="polite">{{ recordingStarting() ? 'Opening…' : recordingActive() ? '● ' + (recording()?.elapsedSeconds ?? 0).toFixed(0) + ' s' : 'Stopped' }}</p><span class="connection-dot" [class.connected]="session()?.authenticated" [attr.aria-label]="session()?.authenticated ? 'Connected' : 'Reconnecting'"></span></div>
+          <div class="camera-stage-area"><div id="camera-full-preview" class="recording-preview"></div></div>
+          @if (recordingError()) { <p class="camera-error" role="alert">{{ recordingError() }}</p> }
+          <div class="camera-stage-bar camera-bottom" [hidden]="!cameraControlsVisible()" (click)="$event.stopPropagation(); showCameraControls()">@if (recordingActive() || recordingStarting()) { <button [disabled]="recordingBusy() && !recordingStarting()" (click)="recordingAction('stop')">Stop</button> } @else { <button class="primary" [disabled]="!native || recordingBusy()" (click)="startMatchRecording()">Record</button> }</div>
+        </div>
+      }
+      @if (framePanel()) {
+        <div class="frame-stage" role="dialog" aria-label="Frame review" (click)="toggleFrameControls()">
+          <div class="frame-toolbar frame-top" [hidden]="!frameControlsVisible()" (click)="$event.stopPropagation(); showFrameControls()"><button [disabled]="hostReviewBusy()" (click)="closeFrameReview(); playHostReview()">Video</button><span>Frames</span><button (click)="closeFrameReview()">Close</button></div>
+          <div class="frame-stage-image">@if (hostFrame(); as f) { <img [src]="'data:image/png;base64,' + f.pngBase64" alt="Replay frame" [style.transform]="'scale(' + frameZoom() + ')'"> } @else { <span>{{ hostReviewBusy() ? 'Loading…' : 'No frame' }}</span> }</div>
+          @if (timingError()) { <p role="alert" class="error">{{ timingError() }}</p> }
+          <div class="frame-controls" [hidden]="!frameControlsVisible()" (click)="$event.stopPropagation(); showFrameControls()">@if (hostFrame(); as f) { <input aria-label="Frame position" type="range" min="0" [max]="f.frameCount - 1" [value]="frameRequested()" (input)="scrubFrame(+$any($event.target).value)" (change)="scrubFrame(+$any($event.target).value, true)"><div class="frame-toolbar"><button [disabled]="hostReviewBusy() || frameRequested() === 0" (click)="requestFrame(frameRequested() - 1)" aria-label="Previous frame">Prev</button><span aria-live="polite">{{ f.index + 1 }} / {{ f.frameCount }}{{ hostReviewBusy() ? ' · …' : '' }}</span><button [disabled]="hostReviewBusy() || frameRequested() >= f.frameCount - 1" (click)="requestFrame(frameRequested() + 1)">Next</button><button (click)="frameZoom.set(frameZoom() === 3 ? 1 : frameZoom() + 1)">{{ frameZoom() }}×</button></div> }</div>
+        </div>
+      }
+      @if (replayPanel() && !framePanel()) {
+        <div class="replay-stage" role="dialog" aria-label="Replay" aria-live="polite">
+          <button class="replay-back" (click)="replayPanel.set(false)">Close</button>
+          <div class="replay-stage-content"><h1>{{ replayHeading() }}</h1>
+            @if (replayInProgress()) { <progress [attr.value]="session()?.transfer?.state === 'receiving' ? session()?.transfer?.bytes : null" [max]="session()?.transfer?.totalBytes || 1"></progress><p>{{ replayWaitSeconds() }} s</p> }
+            @if (timingError()) { <p class="error" role="alert">{{ timingError() }}</p> }
+            @if (session()?.review?.state === 'failed') { <p class="error">{{ session()?.review?.detail }}</p> }
+            @if (!replayInProgress() && !hostReviewReady()) { <button class="primary" [disabled]="!session()?.authenticated || hostReviewBusy()" (click)="role() === 'viewer' ? fetchViewerReplay() : requestMatchReview()">Retry</button> }
+            @if (session()?.hasPlayableReview && !replayInProgress()) { <button [disabled]="hostReviewBusy()" (click)="playHostReview()">Play</button><button [disabled]="hostReviewBusy()" (click)="openFrameReview()">Frames</button> }
+          </div>
+        </div>
+      }
+      <nav class="match-nav"><img class="brand-logo" src="assets/brand/logo.png" alt="One More Look"><button class="utility-button" aria-label="Diagnostics" [attr.aria-label]="diagnosticsMode() ? 'Back to match' : 'Diagnostics'" (click)="toggleDiagnostics()"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="currentColor" stroke="none"/><circle cx="15" cy="17" r="3" fill="currentColor" stroke="none"/></svg></button></nav>
+      <div [hidden]="diagnosticsMode()" class="match">
+        @if (!matchRoleChosen()) {
+          <div class="role-cards"><button (click)="chooseMatchRole('host')"><strong>Host</strong></button><button (click)="chooseMatchRole('camera')"><strong>Camera</strong></button><button (click)="chooseMatchRole('viewer')"><strong>Viewer</strong></button></div>
+        } @else {
+          <header class="match-header"><h1>{{ role() === 'host' ? 'Host' : role() === 'viewer' ? 'Viewer' : 'Camera' }}</h1><span class="status-chip" [class.connected]="session()?.authenticated">{{ session()?.authenticated ? '● Connected' : networkBusy() ? 'Connecting…' : 'Waiting…' }}</span></header>
+          <section class="network-setup" [class.connected-network]="session()?.authenticated && !showHostQR()">
+            @if (role() === 'host') {
+              <div class="pairing-types"><button [attr.aria-pressed]="!viewerQR()" (click)="viewerQR.set(false); qrKeyReset()">Camera QR</button><button [attr.aria-pressed]="viewerQR()" (click)="viewerQR.set(true); showHostQR.set(true); qrKeyReset()">Viewer QR</button></div>
+              @if (session()?.authenticated) { <button (click)="showHostQR.update(toggleQR)">{{ showHostQR() ? 'Hide QR' : 'Pairing QR' }}</button> }
+              @if (!sessionActive()) { <button class="primary" [disabled]="!native || networkBusy()" (click)="networkAction('start')">Retry pairing</button> }
+              @if (sessionActive() && (!session()?.authenticated || showHostQR())) {
+                <div class="pairing-heading"><h2>{{ viewerQR() ? 'Join as viewer' : 'Pair camera' }}</h2><p>Same Wi-Fi or hotspot</p></div>
+                @if (session()!.addresses.length > 1) { <select aria-label="Wi-Fi address" [value]="qrAddress()" (change)="qrAddress.set($any($event.target).value); refreshQR()">@for (candidate of session()!.addresses; track candidate) { <option [value]="candidate.split(': ')[1]">{{ candidate }}</option> }</select> }
+                @if (qrImage()) { <figure class="pairing-qr"><img [src]="qrImage()" alt="Pairing QR"></figure> } @else { <p>Preparing QR…</p> }
+              }
+            } @else {
+              @if (!session()?.authenticated) { <button class="primary" [disabled]="!native || networkBusy() || recordingActive()" (click)="scanAndConnect()">Scan QR</button> }
+              @if (session()?.authenticated && role() === 'camera') { <button (click)="enterCameraView()">Open camera</button> }
+            }
+            @if (networkError()) { <p class="error" role="alert">{{ networkError() }}</p> }
+          </section>
+          @if (role() === 'host' && (session()?.authenticated || session()?.hasPlayableReview)) {
+            <section class="host-review"><button class="primary review-button" [disabled]="!session()?.authenticated || networkBusy() || matchReviewBusy() || reviewPending() || transferActive() || hostReviewBusy() || !cameraReadyForReview()" (click)="requestMatchReview()">{{ replayInProgress() ? 'Preparing…' : 'Review last ' + effectiveReviewSeconds() + ' s' }}</button><p aria-live="polite">{{ matchProgress() }}</p>
+              @if (replayInProgress()) { <button (click)="replayPanel.set(true)">Progress</button> }
+              @if (timingError()) { <p class="error" role="alert">{{ timingError() }}</p> }
+              @if (session()?.hasPlayableReview && !reviewPending() && !transferActive()) { @if (!hostReviewReady()) { <p>Previous replay</p> }<div class="replay-actions"><button [disabled]="hostReviewBusy()" (click)="playHostReview()">Replay</button><button [disabled]="hostReviewBusy()" (click)="saveReview()">Save</button></div>@if (saveMessage()) { <p role="status">{{ saveMessage() }}</p> } }
+            </section>
+            <details><summary>Settings</summary><p>Review {{ effectiveReviewSeconds() }} s</p><p>Buffer {{ session()?.peerRecording?.retentionSeconds ?? retentionSeconds() }} s</p></details>
+          }
+          @if (role() === 'viewer') {
+            <section class="host-review"><button class="primary review-button" [disabled]="!session()?.authenticated || hostReviewBusy() || matchReviewBusy() || reviewPending() || transferActive()" (click)="fetchViewerReplay()">Latest replay</button>
+            @if (session()?.hasPlayableReview && !reviewPending() && !transferActive()) { <button [disabled]="hostReviewBusy()" (click)="playHostReview()">Replay</button> }
+            @if (session()?.review?.state === 'failed') { <p role="status">{{ session()?.review?.detail }}</p> }
+            </section>
+          }
+          <button class="end-match" [disabled]="networkBusy() || recordingBusy() || matchReviewBusy()" (click)="endMatch()">{{ role() === 'viewer' ? 'Leave' : 'End match' }}</button>
+        }
+        @if (endMessage()) { <p role="status">{{ endMessage() }}</p> }
+        @if (!native) { <p>Phone app required.</p> }
+      </div>
+      <div [hidden]="!diagnosticsMode()">
+      <header><p class="eyebrow">ONE MORE LOOK · P0-08</p><h1>Feasibility harness</h1>
         <p>Local experiments on real phones. Players make the decisions.</p></header>
       <section><h2>Phone role</h2><div class="roles">
         <button [disabled]="sessionActive() || networkBusy()" [attr.aria-pressed]="role() === 'host'" (click)="role.set('host')">Host</button>
@@ -82,6 +152,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
         <p>Status messages are authenticated; sample and recording video packets are encrypted. Backgrounding stops the session; restart after returning.</p>
       </section>
       <section><h2>Camera-to-host review</h2>
+        @if (session()?.transfer; as t) { @if (t.durationSeconds) { <p>Transfer {{ ((t.dataMs ?? 0) / 1000).toFixed(2) }} s · Verify {{ ((t.verificationMs ?? 0) / 1000).toFixed(2) }} s · {{ t.windowChunks ?? 1 }} chunks per acknowledgement</p> } }
         <p>Pair first, then start recording on the Camera phone. Clock measurement uses eight authenticated exchanges. Review stays anchored to the native tap timestamp, even with delivery delay.</p>
         <button [disabled]="!session()?.authenticated || reviewPending()" (click)="timingAction('measure')">Measure phone clocks</button>
         @if (session()?.clock; as c) { <p>{{ c.samples }} samples · peer minus this phone {{ (c.offsetUs / 1000).toFixed(2) }} ms · network uncertainty ±{{ (c.uncertaintyUs / 1000).toFixed(2) }} ms</p> }
@@ -105,8 +176,8 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
           @if (session()?.transfer?.recording; as m) { <p>Camera source {{ m.sourceFirstUs }}–{{ m.sourceLastUs }} µs · final frame minus mapped tap {{ m.endpointErrorUs }} µs · configuration {{ m.retentionSeconds }} / {{ m.reviewSeconds }} s</p> }
         }
         @if (session()?.review; as r) { <p>{{ r.detail ?? r.state }} · tap {{ r.peerTapUs }} µs · injected delay {{ r.injectedDelayMs ?? 0 }} ms</p> }
-        @if (session()?.review?.verifiedElapsedMs !== undefined) { <p>Tap → verified host clip: {{ (session()!.review!.verifiedElapsedMs! / 1000).toFixed(2) }} s</p> }
-        @if (session()?.review?.tapToPlayMs !== undefined) { <p>Tap → playback started: {{ (session()!.review!.tapToPlayMs! / 1000).toFixed(2) }} s · target ≤30 s (includes delivery delay and any wait before Play)</p> }
+        @if (session()?.review?.verifiedElapsedMs != null) { <p>Tap → verified host clip: {{ (session()!.review!.verifiedElapsedMs! / 1000).toFixed(2) }} s</p> }
+        @if (session()?.review?.tapToPlayMs != null) { <p>Tap → playback started: {{ (session()!.review!.tapToPlayMs! / 1000).toFixed(2) }} s · target ≤30 s (includes delivery delay and any wait before Play)</p> }
         <p>If a review fails, close playback, reconnect if needed, measure clocks and request again. Retry uses a new tap and transfers from the beginning; unavailable footage is an error.</p>
         @if (timingError()) { <p class="error" role="alert">{{ timingError() }}</p> }
         <p>Measure again after reconnect or after 30 seconds. Network uncertainty excludes sensor exposure/clock drift and bridge scheduling; this is not frame-perfect synchronization.</p>
@@ -141,7 +212,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
       </section>
       <section><h2>Rolling camera recording</h2>
       @if (!recordingSupported) { <p>Camera recording requires an installed Android or iPhone app.</p> } @else {
-        <p><strong>Turn the phone sideways before starting.</strong> Enable auto-rotate on Android or turn off Portrait Orientation Lock on iPhone. Rear camera, no audio; keep this app on screen.</p>
+        <p>Use the live preview to position the phone. Rear camera, no audio; keep this app on screen.</p>
         <div id="recording-preview" class="recording-preview"><span>{{ recordingActive() ? 'Live rear camera' : recordingStarting() ? 'Opening rear camera…' : 'Live camera view appears here when you start' }}</span></div>
         <p aria-live="polite"><strong>{{ recordingStarting() ? 'Starting camera…' : recording()?.state === 'recording' ? '● Recording — live camera active' : recording()?.state === 'stopping' ? 'Stopping recording…' : 'Camera stopped' }}</strong></p>
         @if (recordingError()) { <p class="error" role="alert">{{ recordingError() }}</p> }
@@ -185,12 +256,146 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
         <p>Timestamp intervals above 50 ms flag investigation; they do not prove a visible gap. Inspect a moving subject or timer across clip boundaries. Backgrounding stops capture. Host review requests send the extracted clip over the paired local connection.</p>
       }
       </section>
+      </div>
     </main>`
 })
 class App implements OnDestroy {
+  readonly cameraFullScreen = signal(false);
+  readonly cameraControlsVisible = signal(true);
+  private cameraHideTimer: ReturnType<typeof setTimeout> | null = null;
+  showCameraControls() {
+    this.cameraControlsVisible.set(true);
+    if (this.cameraHideTimer) clearTimeout(this.cameraHideTimer);
+    this.cameraHideTimer = setTimeout(() => this.cameraControlsVisible.set(false), 3500);
+  }
+  toggleCameraControls() {
+    if (this.cameraControlsVisible()) { this.cameraControlsVisible.set(false); if (this.cameraHideTimer) clearTimeout(this.cameraHideTimer); }
+    else this.showCameraControls();
+  }
+  readonly replayPanel = signal(false);
+  readonly replayWaitSeconds = signal(0);
+  private replayTappedAt = 0;
+  async enterCameraView() { this.showCameraControls(); this.cameraFullScreen.set(true); await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); await this.updateRecordingPreview(); }
+  async startMatchRecording() {
+    await this.recordingAction('start');
+  }
+  leaveCameraView() { this.cameraFullScreen.set(false); this.previewLayoutChanged(); }
+  cameraReadyForReview() { const camera = this.session()?.peerRecording; return camera?.state === 'recording' && (camera.bufferedSeconds ?? camera.elapsedSeconds) >= this.effectiveReviewSeconds() + 1; }
+  replayInProgress() { return this.matchReviewBusy() || this.reviewPending() || this.transferActive(); }
+  replayHeading() {
+    if (this.matchReviewBusy()) return 'Preparing…';
+    if (this.timingError() || this.session()?.review?.state === 'failed') return 'Unavailable';
+    if (this.hostReviewReady()) return 'Ready';
+    if (this.session()?.transfer?.state === 'receiving') return 'Receiving…';
+    return 'Preparing…';
+  }
+  replayExplanation() {
+    if (this.matchReviewBusy()) return 'Checking the phone connection and matching the moment you tapped.';
+    if (this.timingError()) return 'Check the message below, then try a new replay.';
+    if (this.session()?.review?.state === 'failed') return this.session()?.review?.detail || 'Check the camera and connection, then retry.';
+    if (this.hostReviewReady()) return 'The recent footage is verified. Playback opens automatically; use Watch replay to open it again.';
+    if (this.session()?.transfer?.state === 'receiving') return 'The camera is sending the recorded footage. Playback opens when verification finishes.';
+    if (this.matchReviewBusy()) return 'Checking the phone connection and matching the moment you tapped.';
+    return 'The camera is preparing footage ending at your tap. Keep both apps open.';
+  }
+  readonly diagnosticsMode = signal(false);
+  readonly matchRoleChosen = signal(false);
+  readonly matchReviewBusy = signal(false);
+  readonly settingsMessage = signal('');
+  readonly frameZoom = signal(1);
+  readonly saveMessage = signal('');
+  async saveReview() {
+    if (this.hostReviewBusy()) return;
+    this.hostReviewBusy.set(true); this.saveMessage.set('Saving replay…');
+    try { await Feasibility.saveReceivedReview(); this.saveMessage.set('Saved'); }
+    catch (error) { this.saveMessage.set(error instanceof Error ? error.message : String(error)); }
+    finally { this.hostReviewBusy.set(false); }
+  }
+  readonly endMessage = signal('');
+  readonly showHostQR = signal(false);
+  readonly viewerQR = signal(false);
+  readonly viewerSecret = signal('');
+  qrKeyReset() { this.qrKey = ''; void this.refreshQR(); }
+  async fetchViewerReplay() {
+    if (this.matchReviewBusy() || this.hostReviewBusy()) return;
+    this.matchReviewBusy.set(true); this.timingError.set(''); this.pendingReviewMode = 'video';
+    this.replayTappedAt = performance.now(); this.replayWaitSeconds.set(0); this.replayPanel.set(true);
+    try { await Feasibility.fetchViewerReplay(); await this.refresh(); this.autoReviewId = this.session()?.review?.requestId ?? ''; }
+    catch (error) { this.timingError.set(error instanceof Error ? error.message : String(error)); }
+    finally { this.matchReviewBusy.set(false); }
+  }
+
+  readonly toggleQR = (value: boolean) => !value;
+  private openCameraAfterPairing = false;
+  private reconnectAt = 0;
+  private reconnectDelay = 2000;
+  private matchEnding = false;
+  async chooseMatchRole(role: 'host' | 'camera' | 'viewer') {
+    this.matchEnding = false; this.reconnectAt = 0; this.reconnectDelay = 2000;
+    this.role.set(role); this.matchRoleChosen.set(true); this.showHostQR.set(false);
+    if (!this.native) return;
+    if (role === 'host') await this.networkAction('start');
+    else await this.scanAndConnect();
+  }
+  private openPairedCamera() {
+    if (!this.openCameraAfterPairing || !this.session()?.authenticated || this.networkBusy() || this.recordingBusy()) return;
+    this.openCameraAfterPairing = false;
+    if (this.role() === 'camera' && !this.recordingActive()) void this.startMatchRecording();
+  }
+  toggleDiagnostics() { this.diagnosticsMode.update(value => !value); this.previewLayoutChanged(); }
+  effectiveReviewSeconds() { return this.session()?.peerRecording?.reviewSeconds ?? this.session()?.transfer?.recording?.reviewSeconds ?? this.reviewSeconds(); }
+  matchProgress() {
+    const s = this.session();
+    if (s?.review?.state === 'failed') return s.review.detail || 'Replay unavailable. Check recording and connection, then retry.';
+    if (s?.transfer?.state === 'receiving') return 'Receiving…';
+    if (this.hostReviewReady()) return '';
+    if (this.matchReviewBusy() || this.reviewPending()) return 'Preparing…';
+    const camera = s?.peerRecording;
+    if (camera?.state !== 'recording') return this.session()?.authenticated ? 'Camera stopped' : '';
+    const remaining = Math.max(0, Math.ceil(this.effectiveReviewSeconds() + 1 - (camera.bufferedSeconds ?? camera.elapsedSeconds)));
+    return remaining > 0 ? 'Ready in ' + remaining + ' s' : '';
+  }
+  saveMatchSettings() {
+    if (this.recordingActive() || this.recordingBusy()) return;
+    const retentionSeconds = this.retentionSeconds(), reviewSeconds = this.reviewSeconds();
+    if (!Number.isInteger(retentionSeconds) || !Number.isInteger(reviewSeconds) || retentionSeconds < 30 || retentionSeconds > 180 || reviewSeconds < 5 || reviewSeconds > 30 || reviewSeconds > retentionSeconds - 10) { this.settingsMessage.set('Use whole seconds: retention 30–180, review 5–30, with a 10-second gap.'); return; }
+    try { localStorage.setItem('cricket-match-settings', JSON.stringify({ retentionSeconds, reviewSeconds })); this.settingsMessage.set('Saved for the next recording.'); } catch { this.settingsMessage.set('Settings apply now; this phone could not save them.'); }
+  }
+  async requestMatchReview() {
+    if (this.matchReviewBusy() || this.reviewPending() || this.transferActive()) return;
+    this.pendingReviewMode = this.reviewMode();
+    this.replayPanel.set(true); this.replayTappedAt = performance.now(); this.replayWaitSeconds.set(0);
+    this.matchReviewBusy.set(true); this.timingError.set(''); this.hostFrame.set(null); this.autoReviewId = '';
+    try {
+      await Feasibility.requestMatchReview();
+      const status = await Feasibility.sessionStatus(); this.session.set(status);
+      this.autoReviewId = status.review?.requestId ?? '';
+    } catch (error) { this.timingError.set(error instanceof Error ? error.message : String(error)); }
+    finally { this.matchReviewBusy.set(false); }
+  }
+  async endMatch() {
+    if (this.role() === 'viewer') {
+      if (this.hostReviewBusy()) return;
+      this.closeFrameReview(); await Feasibility.stopSession(); await Feasibility.cleanupSamples();
+      this.secret.set(''); this.matchRoleChosen.set(false); this.session.set(null); return;
+    }
+    if (!window.confirm('End match and delete temporary footage?')) return;
+    if (this.networkBusy()) return;
+    this.matchEnding = true; this.openCameraAfterPairing = false; this.cameraFullScreen.set(false); this.closeFrameReview();
+    this.networkBusy.set(true); this.endMessage.set('Ending…');
+    try {
+      const peer = await Feasibility.endPeerMatch();
+      await Feasibility.stopRecording(); await Feasibility.stopSession();
+      await Feasibility.cleanupRecording(); await Feasibility.cleanupSamples();
+      this.secret.set(''); this.qrImage.set(''); this.autoReviewId = ''; this.hostFrame.set(null);
+      await this.refresh(); this.matchRoleChosen.set(false);
+      this.endMessage.set(peer.acknowledged ? 'Match ended' : 'Ended here. End the other phone too.');
+    } catch (error) { this.endMessage.set('Cleanup unfinished: ' + (error instanceof Error ? error.message : String(error)) + '. Close playback and retry End match.'); }
+    finally { this.networkBusy.set(false); this.openPairedCamera(); }
+  }
   readonly runtime = Capacitor.getPlatform();
   readonly native = Capacitor.isNativePlatform();
-  readonly role = signal<'host' | 'camera'>('host');
+  readonly role = signal<'host' | 'camera' | 'viewer'>('host');
   readonly busy = signal(false);
   readonly diagnostics = signal<Diagnostics | null>(null);
   readonly error = signal('');
@@ -211,15 +416,55 @@ class App implements OnDestroy {
   async playHostReview() {
     if (this.hostReviewBusy()) return;
     this.hostReviewBusy.set(true); this.timingError.set('');
-    try { await Feasibility.playReceivedReview({ rate: this.hostPlaybackRate() }); }
-    catch (error) { this.timingError.set(error instanceof Error ? error.message : String(error)); }
+    try { this.videoPanel.set(true); await Feasibility.playReceivedReview({ rate: this.hostPlaybackRate() }); }
+    catch (error) { this.videoPanel.set(false); this.timingError.set(error instanceof Error ? error.message : String(error)); }
     finally { this.hostReviewBusy.set(false); }
   }
+  readonly reviewMode = signal<'video' | 'frames'>('video');
+  private pendingReviewMode: 'video' | 'frames' = 'video';
+  readonly framePanel = signal(false);
+  readonly videoPanel = signal(false);
+  readonly frameControlsVisible = signal(true);
+  private frameHideTimer: ReturnType<typeof setTimeout> | null = null;
+  showFrameControls() {
+    this.frameControlsVisible.set(true);
+    if (this.frameHideTimer) clearTimeout(this.frameHideTimer);
+    this.frameHideTimer = setTimeout(() => this.frameControlsVisible.set(false), 3500);
+  }
+  toggleFrameControls() { if (this.frameControlsVisible()) { this.frameControlsVisible.set(false); if (this.frameHideTimer) clearTimeout(this.frameHideTimer); } else this.showFrameControls(); }
+
+  readonly frameRequested = signal(0);
+  private queuedFrame: number | null = null;
+  private frameGeneration = 0;
+  private frameScrubTimer: ReturnType<typeof setTimeout> | null = null;
+  async openFrameReview() {
+    this.showFrameControls(); this.replayPanel.set(false); this.frameZoom.set(1); this.framePanel.set(true);
+    await this.inspectHostFrame(0);
+  }
+  closeFrameReview() {
+    if (this.frameHideTimer) clearTimeout(this.frameHideTimer);
+    this.framePanel.set(false); this.queuedFrame = null; this.frameGeneration++;
+    if (this.frameScrubTimer) clearTimeout(this.frameScrubTimer); this.frameScrubTimer = null;
+  }
+  scrubFrame(index: number, immediate = false) {
+    this.frameRequested.set(index);
+    if (this.frameScrubTimer) clearTimeout(this.frameScrubTimer);
+    if (immediate) { this.frameScrubTimer = null; this.requestFrame(index); }
+    else this.frameScrubTimer = setTimeout(() => { this.frameScrubTimer = null; this.requestFrame(index); }, 120);
+  }
+  requestFrame(index: number) { void this.inspectHostFrame(index); }
   async inspectHostFrame(index: number) {
+    this.frameRequested.set(index); this.queuedFrame = index;
     if (this.hostReviewBusy()) return;
     this.hostReviewBusy.set(true); this.timingError.set('');
-    try { this.hostFrame.set(await Feasibility.inspectReceivedReviewFrame({ index })); }
-    catch (error) { this.hostFrame.set(null); this.timingError.set(error instanceof Error ? error.message : String(error)); }
+    const generation = this.frameGeneration;
+    try {
+      while (this.queuedFrame !== null && generation === this.frameGeneration) {
+        const target = this.queuedFrame; this.queuedFrame = null;
+        const frame = await Feasibility.inspectReceivedReviewFrame({ index: target });
+        if (generation === this.frameGeneration) this.hostFrame.set(frame);
+      }
+    } catch (error) { this.queuedFrame = null; this.timingError.set(error instanceof Error ? error.message : String(error)); }
     finally { this.hostReviewBusy.set(false); }
   }
   readonly frame = signal<RecordedFrame | null>(null);
@@ -230,6 +475,7 @@ class App implements OnDestroy {
     try {
       if (action === 'measure') await Feasibility.measureReviewClock();
       else {
+        this.pendingReviewMode = 'video';
         this.hostFrame.set(null); this.autoReviewId = '';
         await Feasibility.requestTimedReview({ delayMs: this.reviewDelayMs() });
         const status = await Feasibility.sessionStatus(); this.session.set(status);
@@ -268,21 +514,21 @@ class App implements OnDestroy {
         this.fullRecordingReport.set('');
         const retentionSeconds = this.retentionSeconds(), reviewSeconds = this.reviewSeconds();
         if (!Number.isInteger(retentionSeconds) || !Number.isInteger(reviewSeconds) || retentionSeconds < 30 || retentionSeconds > 180 || reviewSeconds < 5 || reviewSeconds > 30 || reviewSeconds > retentionSeconds - 10) throw new Error('Use retention 30–180 and review 5–30 whole seconds; review must be at least 10 seconds shorter.');
-        if (window.innerHeight > window.innerWidth) throw new Error('Turn the phone sideways first. Enable auto-rotate on Android or turn off Portrait Orientation Lock on iPhone.');
         const permission = await Feasibility.requestCameraPermission();
         this.diagnostics.set(permission);
         if (permission.cameraPermission !== 'granted') throw new Error('Camera permission is needed. Allow Camera in the phone’s app settings, then try again.');
         this.recordingStarting.set(true);
-        document.getElementById('recording-preview')?.scrollIntoView({ block: 'center' });
+        if (!this.diagnosticsMode()) await this.enterCameraView();
+        if (!this.cameraFullScreen()) document.getElementById(this.diagnosticsMode() ? 'recording-preview' : 'match-preview')?.scrollIntoView({ block: 'center' });
         await this.updateRecordingPreview();
         if (attempt !== this.recordingStartAttempt) return;
         await Feasibility.startRecording({ retentionSeconds, reviewSeconds });
-      } else if (action === 'stop') await Feasibility.stopRecording();
+      } else if (action === 'stop') { await Feasibility.stopRecording(); if (this.diagnosticsMode()) this.cameraFullScreen.set(false); }
       else if (action === 'extract') await Feasibility.extractRecording();
       else if (action === 'play') await Feasibility.playRecordingClip({ rate: this.playbackRate() });
       else await Feasibility.cleanupRecording();
       this.recording.set(await Feasibility.recordingStatus());
-    } catch (error) { this.recordingError.set(error instanceof Error ? error.message : String(error)); }
+    } catch (error) { this.recordingError.set(error instanceof Error ? error.message : String(error)); if (action === 'start' && this.diagnosticsMode()) this.cameraFullScreen.set(false); }
     finally {
       if (action === 'start') this.recordingStarting.set(false);
       if (action !== 'stop') this.recordingBusy.set(false);
@@ -300,10 +546,10 @@ class App implements OnDestroy {
   };
   private async updateRecordingPreview() {
     if (!this.recordingSupported) return;
-    const rect = document.getElementById('recording-preview')?.getBoundingClientRect();
+    const rect = document.getElementById(this.cameraFullScreen() ? 'camera-full-preview' : this.diagnosticsMode() ? 'recording-preview' : 'match-preview')?.getBoundingClientRect();
     if (!rect) return;
     await Feasibility.setRecordingPreview({ x: rect.x, y: rect.y, width: rect.width, height: rect.height,
-      viewportWidth: window.innerWidth, visible: this.recordingStarting() || this.recordingActive() });
+      viewportWidth: window.innerWidth, visible: this.recordingStarting() || this.recordingActive(), fullscreen: this.cameraFullScreen() });
   }
   readonly secret = signal('');
   readonly port = signal(8765);
@@ -319,28 +565,49 @@ class App implements OnDestroy {
   readonly qrAddress = signal('');
   private qrKey = '';
   private polling = false;
+  private statusPoll = 0;
   private readonly timer = this.networkSupported ? setInterval(() => void this.refresh(), 1000) : null;
+  private readonly replayBack = () => {
+    if (this.framePanel()) this.closeFrameReview();
+    else if (this.replayPanel()) this.replayPanel.set(false);
+    else if (this.cameraFullScreen()) this.cameraFullScreen.set(false);
+  };
   constructor() {
+    window.addEventListener('replayBack', this.replayBack);
+    effect(() => { const enabled = this.cameraFullScreen() || this.framePanel(); if (this.native) void Feasibility.setFullscreen({ enabled }); });
+    if (this.native) void Feasibility.addListener('reviewFrames', () => { this.videoPanel.set(false); void this.openFrameReview(); });
+
+    try {
+      const settings = JSON.parse(localStorage.getItem('cricket-match-settings') ?? 'null');
+      if (settings && Number.isInteger(settings.retentionSeconds) && Number.isInteger(settings.reviewSeconds) && settings.retentionSeconds >= 30 && settings.retentionSeconds <= 180 && settings.reviewSeconds >= 5 && settings.reviewSeconds <= 30 && settings.reviewSeconds <= settings.retentionSeconds - 10) { this.retentionSeconds.set(settings.retentionSeconds); this.reviewSeconds.set(settings.reviewSeconds); }
+    } catch { /* Defaults remain usable when storage is unavailable. */ }
     if (this.networkSupported) void this.refresh();
     window.addEventListener('scroll', this.previewLayoutChanged, { passive: true });
     window.addEventListener('resize', this.previewLayoutChanged);
   }
   ngOnDestroy() {
     if (this.timer) clearInterval(this.timer);
+    if (this.frameScrubTimer) clearTimeout(this.frameScrubTimer);
+    if (this.frameHideTimer) clearTimeout(this.frameHideTimer);
+    if (this.cameraHideTimer) clearTimeout(this.cameraHideTimer);
     if (this.previewFrame !== null) cancelAnimationFrame(this.previewFrame);
+    window.removeEventListener('replayBack', this.replayBack);
     window.removeEventListener('scroll', this.previewLayoutChanged);
     window.removeEventListener('resize', this.previewLayoutChanged);
   }
   sessionActive() { return !['stopped', 'failed'].includes(this.session()?.state ?? 'stopped'); }
   private async refresh() {
+    if (this.replayInProgress() && this.replayTappedAt) this.replayWaitSeconds.set(Math.floor((performance.now() - this.replayTappedAt) / 1000));
     if (this.polling) return;
     this.polling = true;
     try {
       const status = await Feasibility.sessionStatus();
-      if (status.review?.requestId !== this.session()?.review?.requestId || status.transfer?.requestId !== this.session()?.transfer?.requestId || status.review?.state !== 'ready') this.hostFrame.set(null);
+      if (this.role() === 'host' && status.authenticated && !this.matchReviewBusy() && !this.reviewPending() && ++this.statusPoll % 5 === 0) await Feasibility.requestMatchStatus();
+      if (status.review?.requestId !== this.session()?.review?.requestId || status.transfer?.requestId !== this.session()?.transfer?.requestId) this.hostFrame.set(null);
       this.session.set(status);
+      if (status.authenticated) { this.reconnectDelay = 2000; this.reconnectAt = 0; }
       if (this.autoReviewId && status.review?.requestId === this.autoReviewId) {
-        if (status.review.state === 'ready') { this.autoReviewId = ''; void this.playHostReview(); }
+        if (status.review.state === 'ready') { this.autoReviewId = ''; this.replayPanel.set(false); if (this.pendingReviewMode === 'frames') void this.openFrameReview(); else void this.playHostReview(); }
         else if (status.review.state === 'failed') this.autoReviewId = '';
       } if (this.transferSupported) this.sample.set(await Feasibility.sampleStatus()); await this.refreshQR(); }
     catch (error) { this.networkError.set(error instanceof Error ? error.message : String(error)); }
@@ -349,12 +616,31 @@ class App implements OnDestroy {
         try {
           const next = await Feasibility.recordingStatus();
           if (next.extraction.sourceLastUs !== this.recording()?.extraction.sourceLastUs) this.frame.set(null);
-          this.recording.set(next); await this.updateRecordingPreview();
+          this.recording.set(next);
+          if (this.cameraFullScreen() && !this.recordingStarting() && next.state === 'failed') this.recordingError.set(next.detail || 'Recording stopped');
+          await this.updateRecordingPreview();
         }
         catch (error) { this.recordingError.set(error instanceof Error ? error.message : String(error)); }
       }
       this.polling = false;
+      this.openPairedCamera();
+      void this.reconnectMatch();
     }
+  }
+  private async reconnectMatch() {
+    if (!this.native || !this.matchRoleChosen() || this.diagnosticsMode() || this.matchEnding || this.networkBusy() || !this.secret() || document.hidden) return;
+    const state = this.session();
+    if (!state || !(state.state === 'failed' || state.state === 'stopped' && state.detail.startsWith('App backgrounded'))) return;
+    if (!this.reconnectAt) { this.reconnectAt = performance.now() + this.reconnectDelay; return; }
+    if (performance.now() < this.reconnectAt) return;
+    this.reconnectAt = performance.now() + this.reconnectDelay; this.reconnectDelay = Math.min(15000, this.reconnectDelay * 2);
+    this.networkBusy.set(true);
+    try {
+      const options = { secret: this.secret(), port: this.port(), viewerSecret: this.viewerSecret() || undefined };
+      if (this.role() === 'host') await Feasibility.startHost(options);
+      else if (this.address()) { const connection = { ...options, address: this.address() }; if (this.role() === 'viewer') await Feasibility.connectViewer(connection); else await Feasibility.connectCamera(connection); }
+    } catch (error) { this.networkError.set(error instanceof Error ? error.message : String(error)); }
+    finally { this.networkBusy.set(false); }
   }
   transferActive() { return ['offer', 'sending', 'receiving', 'finishing'].includes(this.session()?.transfer?.state ?? 'idle'); }
   async sampleAction(action: 'generate' | 'send' | 'play' | 'cleanup') {
@@ -371,17 +657,19 @@ class App implements OnDestroy {
   }
   async refreshQR() {
     const state = this.session();
-    if (this.role() !== 'host' || state?.state !== 'listening' || !this.secret()) {
+    if (this.role() !== 'host' || !['listening', 'connected'].includes(state?.state ?? '') || !this.secret()) {
       this.qrKey = ''; this.qrImage.set(''); return;
     }
-    const candidates = state.addresses.map(value => value.split(': ')[1]).filter(Boolean);
+    const candidates = state!.addresses.map(value => value.split(': ')[1]).filter(Boolean);
     if (!candidates.includes(this.qrAddress())) this.qrAddress.set(candidates[0] ?? '');
     if (!this.qrAddress()) { this.qrKey = ''; this.qrImage.set(''); return; }
-    const key = `${this.qrAddress()}:${state.port}:${this.secret()}`;
+    const qrSecret = this.viewerQR() ? this.viewerSecret() : this.secret();
+    const qrPort = (state!.port ?? this.port()) + (this.viewerQR() ? 1 : 0);
+    const key = `${this.qrAddress()}:${qrPort}:${qrSecret}`;
     if (key === this.qrKey) return;
     this.qrKey = key; this.qrImage.set('');
     try {
-      const result = await Feasibility.createPairingQR({ address: this.qrAddress(), port: state.port ?? this.port(), secret: this.secret() });
+      const result = await Feasibility.createPairingQR({ address: this.qrAddress(), port: qrPort, secret: qrSecret });
       if (this.qrKey === key) this.qrImage.set(result.image);
     } catch (error) {
       if (this.qrKey === key) { this.qrKey = ''; this.networkError.set(error instanceof Error ? error.message : String(error)); }
@@ -389,14 +677,16 @@ class App implements OnDestroy {
   }
   async scanAndConnect() {
     if (this.networkBusy()) return;
+    this.openCameraAfterPairing = false;
     this.networkBusy.set(true); this.networkError.set('');
     try {
       const options = await Feasibility.scanPairingQR();
       this.address.set(options.address); this.port.set(options.port); this.secret.set(options.secret);
-      await Feasibility.connectCamera(options);
+      this.openCameraAfterPairing = this.role() === 'camera' && !this.diagnosticsMode();
+      if (this.role() === 'viewer') await Feasibility.connectViewer(options); else await Feasibility.connectCamera(options);
       await this.refresh();
     } catch (error) { this.networkError.set(error instanceof Error ? error.message : String(error)); }
-    finally { this.networkBusy.set(false); }
+    finally { this.networkBusy.set(false); this.openPairedCamera(); }
   }
   async networkAction(action: 'generate' | 'start' | 'stop' | 'ping' | 'status') {
     if (this.networkBusy()) return;
@@ -405,14 +695,14 @@ class App implements OnDestroy {
       if (action === 'generate') this.secret.set((await Feasibility.generateSessionSecret()).secret);
       else if (action === 'stop') { await Feasibility.stopSession(); this.secret.set(''); this.qrKey = ''; this.qrImage.set(''); }
       else if (action === 'start') {
-        if (this.role() === 'host') this.secret.set((await Feasibility.generateSessionSecret()).secret);
-        const options = { secret: this.secret(), port: this.port() };
+        if (this.role() === 'host') { this.secret.set((await Feasibility.generateSessionSecret()).secret); this.viewerSecret.set((await Feasibility.generateSessionSecret()).secret); }
+        const options = { secret: this.secret(), port: this.port(), viewerSecret: this.viewerSecret() || undefined };
         if (this.role() === 'host') await Feasibility.startHost(options);
         else await Feasibility.connectCamera({ ...options, address: this.address().trim() });
       } else await Feasibility.sendSessionPing({ status: action === 'status' });
       await this.refresh();
     } catch (error) { this.networkError.set(error instanceof Error ? error.message : String(error)); }
-    finally { this.networkBusy.set(false); }
+    finally { this.networkBusy.set(false); this.openPairedCamera(); }
   }
   async run(action: 'ping' | 'permission') {
     if (this.busy()) return;

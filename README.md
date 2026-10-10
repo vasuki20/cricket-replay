@@ -1,7 +1,7 @@
-# cricket-replay
+# One More Look
 Offline cricket replay using nearby phones. Built for casual matches on Android and iPhone.
 
-The P0 feasibility harness uses Angular, Capacitor, Swift and Kotlin. Development and local testing use two iPhones and a OnePlus Nord CE 3 Lite 5G (Android 14). Android build, installation, and native harness checks pass.
+Match mode now opens by default, with the P0 tools retained under Diagnostics. The app uses Angular, Capacitor, Swift and Kotlin. Development and local testing use two iPhones and a OnePlus Nord CE 3 Lite 5G (Android 14). Android build, installation, and native harness checks pass.
 
 ```sh
 npm ci
@@ -30,3 +30,7 @@ The [review timing and recorded-frame experiment](docs/feasibility/review-timing
 The iPhone P0-03 connection experiment and two-phone test procedure are in [connectivity.md](docs/feasibility/connectivity.md). Shared-Wi-Fi QR pairing and peer ping passed by user report. The iPhone [generated-video transfer experiment](docs/feasibility/transfer.md) adds encrypted MP4 transfer, checksum verification, progress, and native playback; mixed-phone tests pass by user report; iPhone-to-iPhone transfer and detailed timings remain pending.
 
 The [P0 exit recommendation](docs/feasibility/p0-exit.md) maps the epic criteria to evidence and blockers: **no-go for starting P1 pending physical validation and user review**. [Architecture decisions](docs/feasibility/architecture-decisions.md) record the provisional native pipeline, transport, clocks, lifecycle and settings decisions, with changes needed in P1/P2/P3.
+
+The interim [first-match field trial #16](https://github.com/vasuki20/cricket-replay/issues/16) is the active work before P1 #2. Start with the [player guide](docs/testing/first-match-guide.md); the [readiness record](docs/testing/first-match-readiness.md) tracks the selected iPhone-camera → OnePlus-host pairing. The historical P0 no-go report above remains evidence of unperformed checks; user-confirmed P0 completion does not establish first-match readiness. The physical rehearsal and trial remain pending.
+
+Brand sources live in `src/assets/brand/` (logo, ground illustration and app icon). Run `xcrun swift scripts/generate-brand-assets.swift` on macOS to regenerate native icon/splash sizes from those originals.

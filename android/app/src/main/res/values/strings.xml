@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Replay Feasibility</string>
-    <string name="title_activity_main">Replay Feasibility</string>
+    <string name="app_name">One More Look</string>
+    <string name="title_activity_main">One More Look</string>
     <string name="package_name">com.aadhinitinytales.cricketreplay</string>
     <string name="custom_url_scheme">com.aadhinitinytales.cricketreplay</string>
 </resources>

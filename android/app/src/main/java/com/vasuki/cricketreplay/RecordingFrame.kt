@@ -12,16 +12,21 @@ import org.json.JSONObject
 // Worker-only: index actual compressed sample PTS, decode an actual presentation frame.
 internal object RecordingFrame {
     fun validateReview(file: File, info: JSONObject) {
-        val count = info.getInt("frames")
-        for (index in listOf(0, count / 2, count - 1)) {
-            val frame = inspect(file, index)
-            check(frame.getInt("frameCount") == count &&
-                (index != 0 || kotlin.math.abs(frame.getLong("timestampUs")) <= 1) &&
-                (index != count - 1 || kotlin.math.abs(frame.getLong("timestampUs") - (info.getLong("sourceLastUs") - info.getLong("sourceFirstUs"))) <= 1)) { "Received recording timestamps/frame count do not match source metadata" }
-        }
-    }
-    fun inspect(file: File, index: Int): JSONObject {
         check(Build.VERSION.SDK_INT >= 28) { "Recorded frame inspection requires Android 9 or later" }
+        val times = sampleTimes(file); val count = info.getInt("frames")
+        check(times.size == count && times.isNotEmpty() && kotlin.math.abs(times.first()) <= 1 &&
+            kotlin.math.abs(times.last() - (info.getLong("sourceLastUs") - info.getLong("sourceFirstUs"))) <= 1) { "Received recording timestamps/frame count do not match source metadata" }
+        val decoder = MediaMetadataRetriever()
+        try {
+            decoder.setDataSource(file.path)
+            check(decoder.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() == count) { "Decoder/sample frame counts differ; exact index inspection unavailable" }
+            for (index in listOf(0, count / 2, count - 1)) {
+                val bitmap = decoder.getFrameAtIndex(index) ?: error("Recorded frame could not decode")
+                bitmap.recycle()
+            }
+        } finally { decoder.release() }
+    }
+    private fun sampleTimes(file: File): List<Long> {
         val times = mutableListOf<Long>()
         val source = MediaExtractor()
         try {
@@ -37,6 +42,11 @@ internal object RecordingFrame {
                 if (!source.advance()) break
             }
         } finally { source.release() }
+        return times
+    }
+    fun inspect(file: File, index: Int): JSONObject {
+        check(Build.VERSION.SDK_INT >= 28) { "Recorded frame inspection requires Android 9 or later" }
+        val times = sampleTimes(file)
         check(index in times.indices) { "Frame index outside recorded clip" }
         val decoder = MediaMetadataRetriever()
         try {

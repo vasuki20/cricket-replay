@@ -1,5 +1,7 @@
 # P0 exit recommendation — #15
 
+> Historical P0 evidence snapshot, retained without inventing new physical results. On 10 October 2026 the user confirmed P0 complete and GitHub #1 is closed. Work now proceeds through interim #16 before #2. The open/closed recommendations below describe the earlier snapshot; the exact trial pairing still requires the [first-match readiness gate](../testing/first-match-readiness.md).
+
 Updated 2026-10-10, Asia/Singapore. Evidence baseline: [`032026c`](https://github.com/vasuki20/cricket-replay/commit/032026c), integrated #14 implementation. Issue [#15](https://github.com/vasuki20/cricket-replay/issues/15), parent [#1](https://github.com/vasuki20/cricket-replay/issues/1).
 
 **Recommendation: NO-GO for starting P1. Continue P0 physical validation.** The reusable implementation and automated evidence justify further testing; they do not establish the required phone-only offline topology, all four pairings, sustained capture or physical review timing. User review of this recommendation is pending. Keep #1 and #15 open; no P1 work begins from this report.

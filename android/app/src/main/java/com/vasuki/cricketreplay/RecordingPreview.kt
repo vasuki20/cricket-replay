@@ -14,7 +14,7 @@ import kotlin.math.roundToInt
 
 // UI thread owns layout. The SurfaceTexture stays alive through scrolling and clip playback.
 internal class RecordingPreview(private val activity: Activity, private val web: WebView) {
-    private val host = FrameLayout(activity).apply { isClickable = false; clipChildren = true }
+    private val host = FrameLayout(activity).apply { isClickable = false; clipChildren = true; setBackgroundColor(android.graphics.Color.BLACK) }
     private val texture = TextureView(activity).apply { isClickable = false }
     private var surface: Surface? = null
     private var waiting = mutableListOf<PluginCall>()
@@ -64,6 +64,9 @@ internal class RecordingPreview(private val activity: Activity, private val web:
             leftMargin = web.left + (x * scale).roundToInt(); topMargin = web.top + (y * scale).roundToInt()
         }
         if (!attached) { parent.addView(host, params); attached = true } else host.layoutParams = params
+        if (call.getBoolean("fullscreen", false) == true) {
+            web.setBackgroundColor(android.graphics.Color.TRANSPARENT); web.bringToFront()
+        } else host.bringToFront()
         // Alpha avoids destroying/recreating a Camera2 target when it leaves the screen.
         host.alpha = if (visible) 1f else 0f
         fit((width * scale).roundToInt(), (height * scale).roundToInt())
