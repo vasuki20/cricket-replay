@@ -13,6 +13,7 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private var config = try! RecordingConfig()
     private var buffer = RecordingBuffer(config: try! RecordingConfig())
     private var capture: AVCaptureSession?
+    private var encoderEpoch = 0
     #if os(iOS)
     private var previewLayer: AVCaptureVideoPreviewLayer?
     #endif
@@ -183,7 +184,7 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                 for notification in [AVCaptureSession.wasInterruptedNotification, AVCaptureSession.runtimeErrorNotification] {
                     self.observers.append(NotificationCenter.default.addObserver(forName: notification, object: capture, queue: nil) { [weak self] note in
                         let reason = (note.userInfo?[AVCaptureSessionErrorKey] as? Error)?.localizedDescription ?? "Camera session interrupted"
-                        self?.queue.async { guard let self, self.run == current else { return }; self.stopOnQueue("\(reason); foreground and explicitly start a new experiment") }
+                        self?.queue.async { guard let self, self.run == current else { return }; self.stopOnQueue("\(reason); foreground and explicitly start a new experiment", interrupted: true) }
                     })
                 }
                 // startRunning must happen after commitConfiguration, on the same non-UI queue.
@@ -233,12 +234,13 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             guard inFlight < 16, let compression else { throw RecordingError.invalid("Encoder backlog exceeded sixteen frames; recording stopped") }
             inFlight += 1
             let current = run
+            let currentEncoder = encoderEpoch
             let properties = forceSync ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
             forceSync = false
             let result = VTCompressionSessionEncodeFrame(compression, imageBuffer: image, presentationTimeStamp: pts,
                 duration: CMSampleBufferGetDuration(sample), frameProperties: properties, infoFlagsOut: nil) { [self] status, flags, encoded in
                 queue.async { [self] in
-                    guard run == current else { return }; inFlight -= 1
+                    guard run == current, encoderEpoch == currentEncoder else { return }; inFlight -= 1
                     do {
                         guard status == noErr else { throw RecordingError.invalid("Encoder callback failed (\(status))") }
                         guard let encoded, !flags.contains(.frameDropped) else {
@@ -363,12 +365,12 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     func completedClip(_ done: @escaping (URL?) -> Void) { queue.async {
         done(!self.extracting && self.extraction["ready"] as? Bool == true && FileManager.default.fileExists(atPath: self.clip.path) ? self.clip : nil)
     } }
-    func stop(reason: String = "Stopped by user", done: @escaping () -> Void = {}) { queue.async {
+    func stop(reason: String = "Stopped by user", interrupted: Bool = false, done: @escaping () -> Void = {}) { queue.async {
         if self.state == "stopping" { self.stopDone.append(done); return }
         guard ["starting", "recording"].contains(self.state) else { done(); return }
-        self.stopDone.append(done); self.stopOnQueue(reason)
+        self.stopDone.append(done); self.stopOnQueue(reason, interrupted: interrupted)
     } }
-    private func stopOnQueue(_ reason: String) {
+    private func stopOnQueue(_ reason: String, interrupted: Bool = false) {
         guard ["starting", "recording"].contains(state) else { return }
         state = "stopping"; detail = reason
         if pendingEnd != nil { extractionFailed(RecordingError.invalid("Recording stopped before extraction sealed")) }
@@ -376,7 +378,18 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         capture?.stopRunning(); detachPreview(); removeObservers(); capture = nil; device = nil; timer?.cancel(); timer = nil
         if let compression {
             let result = VTCompressionSessionCompleteFrames(compression, untilPresentationTimeStamp: .invalid)
-            if result != noErr { fail(RecordingError.invalid("Cannot drain encoder (\(result))")); return }
+            if result != noErr {
+                guard interrupted && result == kVTInvalidSessionErr else {
+                    fail(RecordingError.invalid("Cannot drain encoder (\(result))")); return
+                }
+                // iOS can revoke the hardware encoder on background/lock. Preserve frames
+                // already appended, disclose any unfinished tail, and fence late callbacks.
+                droppedEncoder += inFlight
+                do { try log("interruptedEncoder", lastPts, "invalid session; \(inFlight) pending frames discarded") }
+                catch { fail(error); return }
+                detail = "\(reason). Encoder unavailable; retained completed frames, unfinished tail may be missing. Tap Start to record again."
+                releaseEncoder(); inFlight = 0
+            }
         }
         finishIfStopped()
         let current = run
@@ -400,7 +413,10 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         startDone?(error); startDone = nil; try? saveReport(); captureEnded?()
         let completions = stopDone; stopDone = []; completions.forEach { $0() }
     }
-    private func releaseEncoder() { if let compression { VTCompressionSessionInvalidate(compression) }; compression = nil }
+    private func releaseEncoder() {
+        encoderEpoch += 1
+        if let compression { VTCompressionSessionInvalidate(compression) }; compression = nil
+    }
     private func detachPreview() {
         #if os(iOS)
         previewLayer?.session = nil; previewLayer = nil
@@ -447,5 +463,9 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     } }
     func appendFixture(_ sample: CMSampleBuffer) throws { try queue.sync { try acceptEncoded(sample) } }
     func appendRawFixture(_ sample: CMSampleBuffer) { queue.sync { encodeInput(sample) } }
+    func stopInvalidatedFixture(interrupted: Bool, done: @escaping () -> Void) { queue.async {
+        if let compression = self.compression { VTCompressionSessionInvalidate(compression) }
+        self.stopDone.append(done); self.stopOnQueue("Fixture interruption", interrupted: interrupted)
+    } }
     #endif
 }

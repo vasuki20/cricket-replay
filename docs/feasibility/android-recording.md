@@ -122,3 +122,7 @@ The user reported a rotated/flipped-looking OnePlus preview while iPhone looks c
 Automated evidence: Android debug and test APK builds passed; JVM tests cover both landscape display directions for sensor orientations 90/270 and 4:3 proportions. Existing buffer/configuration tests pass too. No Android phone was connected during the build checks (ADB showed only an offline emulator). The OnePlus was subsequently connected on 2026-10-06; installation of the updated debug APK succeeded via ADB. Corrected visual preview/recorded-clip orientation remains to be confirmed on OnePlus.
 
 At the user’s request the tester sheet is now a 15–20 minute functional check with Works/Problem selections and optional notes. No copying reports, numeric checkpoints or 30-minute run is required of the casual tester. The full endurance, dropped-interval, heat/storage, permission and disconnect scenarios above remain pending follow-up; quick-check completion alone does not close #11 or the epic.
+
+## User quick-check report — 2026-10-10
+
+The user reports completing the quick tests on both platforms: recording/playback works. A similar error occurs after lock/unlock or Home-screen/return on OnePlus, but no exact Android error text or diagnostic report was supplied and only iPhone is currently available for retesting. Android interruption recovery remains unresolved; the iOS `Cannot drain encoder (-12903)` fix is platform-specific and does not establish an Android pass. No 30-minute or measured frame/heat/storage acceptance is claimed.

@@ -216,9 +216,18 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     public override func load() {
         recording.captureEnded = { [weak self] in DispatchQueue.main.async { self?.restoreRecordingScreen() } }
         backgroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.recording.stop(reason: "App backgrounded/locked; foreground and explicitly start a new experiment")
-            self?.restoreRecordingScreen()
-            self?.session.stop(reason: "App backgrounded; foreground and restart/reconnect")
+            guard let self else { return }
+            var task = UIBackgroundTaskIdentifier.invalid
+            task = UIApplication.shared.beginBackgroundTask(withName: "Finalize recording") {
+                if task != .invalid { UIApplication.shared.endBackgroundTask(task); task = .invalid }
+            }
+            self.recording.stop(reason: "App backgrounded/locked; foreground and explicitly start a new experiment", interrupted: true) {
+                DispatchQueue.main.async {
+                    if task != .invalid { UIApplication.shared.endBackgroundTask(task); task = .invalid }
+                }
+            }
+            self.restoreRecordingScreen()
+            self.session.stop(reason: "App backgrounded; foreground and restart/reconnect")
         }
     }
     deinit {

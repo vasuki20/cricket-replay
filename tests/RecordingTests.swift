@@ -21,8 +21,33 @@ struct RecordingTests {
         }
         try protection()
         try failureCleanup()
+        try invalidatedEncoderStop()
         try syntheticCapture()
         print("PASS: configuration, pin/finalization eviction protection, failure cleanup, continuous synthetic VideoToolbox encoding, cross-file remux, decoded joins, eviction, stop and cleanup")
+    }
+    static func invalidatedEncoderStop() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("cricket-interruption-test-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let engine = RollingRecording(directory: root)
+        for interrupted in [true, false, true] {
+            try engine.beginFixture(config: RecordingConfig())
+            for frame in 0..<30 { engine.appendRawFixture(try pixelSample(frame: frame, origin: 1_000_000)) }
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while (try status(engine)["encodedFrames"] as? Int ?? 0) < 25 && ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.01) }
+            let ready = try status(engine)
+            try require(ready["encodedFrames"] as? Int ?? 0 >= 25, "fixture encoder did not produce frames")
+            let done = DispatchSemaphore(value: 0)
+            engine.stopInvalidatedFixture(interrupted: interrupted) { done.signal() }
+            try require(done.wait(timeout: .now() + 15) == .success, "invalidated stop did not complete")
+            let result = try status(engine)
+            try require(result["state"] as? String == (interrupted ? "stopped" : "failed"), "invalid-session policy changed: \(result)")
+            if interrupted {
+                try require((result["closedSegments"] as? Int ?? 0) > 0, "accepted frames were not finalized")
+                try require((result["detail"] as? String ?? "").contains("tail"), "unfinished tail not disclosed")
+                let media = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).first { $0.pathExtension == "mp4" }!
+                _ = try AVAssetImageGenerator(asset: AVURLAsset(url: media)).copyCGImage(at: .zero, actualTime: nil)
+            }
+        }
     }
     static func protection() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("cricket-pin-test-\(UUID())")
