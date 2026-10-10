@@ -1,6 +1,6 @@
 # Review timing and recorded frames — #13
 
-Implemented experiment, 2026-10-10. This adds timing and inspection to both native recording prototypes. Physical accuracy remains unverified. The requested clip stays on the camera phone; recording-clip transfer and host playback are the next integration task, #14. Existing encrypted synthetic-video transfer is preserved.
+Implemented experiment, 2026-10-10. This adds timing and inspection to both native recording prototypes. Physical accuracy remains unverified. Update for #14: the [integrated review flow](capture-to-review.md) transfers the requested recording clip to Host, preserving source timing. The evidence below describes #13 before that integration. Existing encrypted synthetic-video transfer is preserved.
 
 ## Timing design
 
@@ -42,7 +42,7 @@ No physical results exist for the new controls yet. Mixed-platform clock exchang
 Use current builds on iPhone and OnePlus, on the same local Wi-Fi. Keep both apps open and Camera sideways. The existing [simple phone sheet](../testing/phone-test-sheet.html) remains unchanged. For this additional check, note only Works/Problem and any exact error:
 
 1. Pair normally. Start recording on **Camera** and wait 25 seconds.
-2. On **Host**, tap **Measure phone clocks**, wait for eight samples, select **None** for delay, then **Request review at this tap**. Wait for “Requested clip ready on camera.” Play it on Camera; confirm the recent scene and that recording continues after closing playback.
+2. On **Host**, tap **Measure phone clocks**, wait for eight samples, select **None** for delay, then **Request review at this tap**. Wait for the verified Host review and automatic playback; confirm the recent scene and that recording continues after closing playback.
 3. Measure again, select **5 seconds**, then request while someone holds up one finger in view. Immediately change to two fingers. The clip should end around the one-finger moment, rather than including five extra seconds of the later scene. Repeat with roles reversed; report noticeably early/late endings or failures.
 4. Close playback. **Inspect first frame**, then **Last frame**. Press **Previous** a few times, then **Next**. Numbers/times should move correctly and returning should restore the image. Play at **0.5×** and **0.25×**; report slower motion, orientation problems or crashes.
 5. Stop/reconnect the local session while keeping recording active. Fresh calibration should be required. Measure again and request once more; confirm recording continued and review worked.
@@ -62,7 +62,7 @@ xcrun swiftc ios/App/App/LocalSession.swift ios/App/App/PairingCode.swift \
   ios/App/App/SampleTransfer.swift tests/ConnectivityTests.swift -o /private/tmp/cricket-connectivity-tests
 /private/tmp/cricket-connectivity-tests
 xcrun swiftc -swift-version 5 -D RECORDING_TEST ios/App/App/RecordingBuffer.swift \
-  ios/App/App/RecordingClip.swift ios/App/App/RollingRecording.swift tests/RecordingTests.swift \
+  ios/App/App/RecordingClip.swift ios/App/App/RollingRecording.swift ios/App/App/SampleTransfer.swift tests/RecordingTests.swift \
   -o /private/tmp/cricket-recording-tests
 /private/tmp/cricket-recording-tests
 ```

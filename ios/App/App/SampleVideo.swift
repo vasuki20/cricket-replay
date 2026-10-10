@@ -11,7 +11,7 @@ enum SampleVideo {
                 let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
                 let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
                     AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 640, AVVideoHeightKey: 360,
-                    AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 2_000_000]])
+                    AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 2_000_000, AVVideoAllowFrameReorderingKey: false, AVVideoMaxKeyFrameIntervalKey: 30]])
                 let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
                     kCVPixelBufferWidthKey as String: 640, kCVPixelBufferHeightKey as String: 360,

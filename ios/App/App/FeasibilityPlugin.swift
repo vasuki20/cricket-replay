@@ -8,6 +8,8 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "FeasibilityPlugin"
     public let jsName = "Feasibility"
     public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "playReceivedReview", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "inspectReceivedReviewFrame", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "inspectRecordingFrame", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "measureReviewClock", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "requestTimedReview", returnType: CAPPluginReturnPromise),
@@ -35,7 +37,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "playReceivedSample", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cleanupSamples", returnType: CAPPluginReturnPromise)
     ]
-    private let session = LocalSession()
+    private let session = LocalSession(directory: FileManager.default.temporaryDirectory.appendingPathComponent("cricket-transfer"))
     private var backgroundObserver: NSObjectProtocol?
     private var scanner: PairingScanner?
     private var requestingScan = false
@@ -46,9 +48,10 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     private var cameraRecording = false
     private var previousIdleTimer: Bool?
     private var inspectingFrame = false
+    private var preparingRemoteReview = false
     private let frameWorker = DispatchQueue(label: "cricket.frame-inspector")
     @objc func inspectRecordingFrame(_ call: CAPPluginCall) { DispatchQueue.main.async {
-        guard !self.inspectingFrame, self.bridge?.viewController?.presentedViewController == nil,
+        guard !self.inspectingFrame, !self.preparingRemoteReview, self.bridge?.viewController?.presentedViewController == nil,
               let index = call.getInt("index"), (0..<10000).contains(index) else { call.reject("Close playback and choose an available frame"); return }
         self.inspectingFrame = true
         self.recording.completedClip { url in
@@ -103,7 +106,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
         switch result { case .success(let report): call.resolve(["report": report]); case .failure(let error): call.reject(error.localizedDescription) }
     } }
     @objc func startRecording(_ call: CAPPluginCall) { DispatchQueue.main.async {
-        guard !self.cameraRecording, !self.generating, !self.inspectingFrame, !self.requestingScan, self.scanner == nil,
+        guard !self.cameraRecording, !self.generating, !self.inspectingFrame, !self.preparingRemoteReview, !self.requestingScan, self.scanner == nil,
               self.bridge?.viewController?.presentedViewController == nil, UIApplication.shared.applicationState == .active else {
             call.reject("Stop capture, close scanning/playback and foreground the app first"); return
         }
@@ -130,7 +133,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     } }
     @objc func stopRecording(_ call: CAPPluginCall) { recording.stop { call.resolve() } }
     @objc func extractRecording(_ call: CAPPluginCall) { DispatchQueue.main.async {
-        guard !self.inspectingFrame, self.bridge?.viewController?.presentedViewController == nil else { call.reject("Close frame inspection/playback before replacing the clip"); return }
+        guard !self.inspectingFrame, !self.preparingRemoteReview, self.bridge?.viewController?.presentedViewController == nil else { call.reject("Close frame inspection/playback before replacing the clip"); return }
         self.recording.extract { error in if let error { call.reject(error.localizedDescription) } else { call.resolve() } }
     } }
     @objc func playRecordingClip(_ call: CAPPluginCall) { recording.completedClip { url in
@@ -147,7 +150,7 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     } }
     @objc func cleanupRecording(_ call: CAPPluginCall) { DispatchQueue.main.async {
-        guard !self.inspectingFrame, self.bridge?.viewController?.presentedViewController == nil else { call.reject("Close frame inspection/playback before cleanup"); return }
+        guard !self.inspectingFrame, !self.preparingRemoteReview, self.bridge?.viewController?.presentedViewController == nil else { call.reject("Close frame inspection/playback before cleanup"); return }
         self.recording.cleanup { error in if let error { call.reject(error.localizedDescription) } else { call.resolve() } }
     } }
     private func restoreRecordingScreen() {
@@ -156,6 +159,40 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
         if let previousIdleTimer { UIApplication.shared.isIdleTimerDisabled = previousIdleTimer }; previousIdleTimer = nil
     }
 
+    @objc func inspectReceivedReviewFrame(_ call: CAPPluginCall) { DispatchQueue.main.async {
+        guard !self.inspectingFrame, !self.preparingRemoteReview, self.bridge?.viewController?.presentedViewController == nil,
+              let index = call.getInt("index"), (0..<10000).contains(index) else { call.reject("Close playback and choose an available frame"); return }
+        self.inspectingFrame = true
+        self.session.acquireReview { url, info in self.frameWorker.async {
+            let result: Result<[String: Any], Error> = Result {
+                guard let url, let info, let origin = info["sourceFirstUs"] as? NSNumber else { throw RecordingError.invalid("No verified host recording review") }
+                let frame = try RecordingClip.inspect(url, index: index)
+                guard let png = UIImage(cgImage: frame.image).pngData() else { throw RecordingError.invalid("Cannot display decoded frame") }
+                return ["index": index, "timestampUs": frame.timeUs, "sourceTimestampUs": origin.int64Value + frame.timeUs,
+                        "frameCount": frame.count, "width": frame.image.width, "height": frame.image.height, "pngBase64": png.base64EncodedString()]
+            }
+            // Release only if acquisition succeeded; another playback may own the lease.
+            if url != nil { self.session.releaseMedia() }
+            DispatchQueue.main.async {
+                self.inspectingFrame = false
+                switch result { case .success(let frame): call.resolve(frame); case .failure(let error): call.reject(error.localizedDescription) }
+            }
+        } }
+    } }
+    @objc func playReceivedReview(_ call: CAPPluginCall) { DispatchQueue.main.async {
+        let rate = Float(call.getDouble("rate") ?? 1)
+        guard [Float(1), 0.5, 0.25].contains(rate), !self.inspectingFrame,
+              let presenter = self.bridge?.viewController, presenter.presentedViewController == nil,
+              UIApplication.shared.applicationState == .active else { call.reject("Close playback/inspection and foreground the app first"); return }
+        self.session.acquireReview { url, _ in DispatchQueue.main.async {
+            guard let url else { call.reject("No complete, verified host recording review"); return }
+            guard presenter.presentedViewController == nil, UIApplication.shared.applicationState == .active else { self.session.releaseMedia(); call.reject("Return to the app before playback"); return }
+            let player = RecordingPlayer(url: url, rate: rate, closed: { self.session.releaseMedia() }) { error in
+                if let error { call.reject(error) } else { self.session.reviewPlaybackStarted(); call.resolve() }
+            }
+            presenter.present(player, animated: true)
+        } }
+    } }
     @objc func sampleStatus(_ call: CAPPluginCall) { DispatchQueue.main.async { call.resolve(self.sampleInfo) } }
     @objc func generateSample(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
@@ -187,13 +224,15 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
     @objc func playReceivedSample(_ call: CAPPluginCall) {
-        session.completedSample { url in
+        session.acquireSample { url in
             guard let url else { call.reject("No complete, checksum-verified sample"); return }
             DispatchQueue.main.async {
                 guard let presenter = self.bridge?.viewController, presenter.presentedViewController == nil,
-                      UIApplication.shared.applicationState == .active else { call.reject("Return to the app before playback"); return }
-                let player = AVPlayerViewController(); player.player = AVPlayer(url: url)
-                presenter.present(player, animated: true) { player.player?.play(); call.resolve() }
+                      UIApplication.shared.applicationState == .active, !self.inspectingFrame else { self.session.releaseMedia(); call.reject("Return to the app and close inspection before playback"); return }
+                let player = RecordingPlayer(url: url, closed: { self.session.releaseMedia() }) { error in
+                    if let error { call.reject(error) } else { call.resolve() }
+                }
+                presenter.present(player, animated: true)
             }
         }
     }
@@ -245,11 +284,24 @@ public class FeasibilityPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     public override func load() {
+        session.onReviewCancelled = { [weak self] in DispatchQueue.main.async { self?.preparingRemoteReview = false } }
+        session.exportReview = { [weak self] done in
+            guard let self else { done(.failure(RecordingError.invalid("Camera unavailable"))); return }
+            self.recording.exportReview { result in
+                DispatchQueue.main.async { self.preparingRemoteReview = false }
+                done(result)
+            }
+        }
+        session.validateReceivedReview = RecordingClip.validateReview
         session.onReview = { [weak self] endpoint, done in
             guard let self else { done(RecordingError.invalid("Camera unavailable")); return }
             DispatchQueue.main.async {
-                guard !self.inspectingFrame, self.bridge?.viewController?.presentedViewController == nil else { done(RecordingError.invalid("Close frame inspection/playback before a remote review")); return }
-                self.recording.extract(endpointHostUs: endpoint, done)
+                guard !self.inspectingFrame, !self.preparingRemoteReview, self.bridge?.viewController?.presentedViewController == nil else { done(RecordingError.invalid("Close frame inspection/playback before a remote review")); return }
+                self.preparingRemoteReview = true
+                self.recording.extract(endpointHostUs: endpoint) { error in
+                    if error != nil { DispatchQueue.main.async { self.preparingRemoteReview = false } }
+                    done(error)
+                }
             }
         }
         recording.captureEnded = { [weak self] in DispatchQueue.main.async { self?.restoreRecordingScreen() } }

@@ -9,7 +9,7 @@ body{font:17px/1.5 system-ui,sans-serif;color:#172330;max-width:760px;margin:24p
 </head>
 <body>
 <h1>Cricket Replay: quick phone check</h1>
-<p><strong>About 15–20 minutes.</strong> Use one iPhone and one OnePlus. Tick the results below. Write a note only if something goes wrong. <strong>No reports or technical numbers to copy.</strong></p>
+<p><strong>About 20–30 minutes.</strong> Use one iPhone and one OnePlus. Tick the results below. Write a note only if something goes wrong. <strong>No reports or technical numbers to copy.</strong></p>
 <p class="note">The app owner should install the latest app first. Keep the recording phone sideways and the app on screen. Enable auto-rotate on OnePlus; turn off Portrait Orientation Lock on iPhone. Leave the recording settings at <strong>120 / 20</strong>.</p>
 <label>Your name (optional)<input data-key="Tester"></label>
 <section>
@@ -31,17 +31,29 @@ body{font:17px/1.5 system-ui,sans-serif;color:#172330;max-width:760px;margin:24p
 </table>
 </section>
 <section>
-<h2>2. Send a demonstration video between the phones</h2>
-<p>Stop recording. Connect both phones to the same Wi-Fi. This sends a built-in demonstration video; your camera clips stay on their recording phone.</p>
+<h2>2. Send real camera reviews — three times in each direction</h2>
+<p>Turn mobile data off on both phones. Join a phone hotspot or local Wi-Fi that works without internet. Pair before starting the camera. Keep footage on these phones.</p>
 <ol>
-<li>On iPhone choose <strong>Host</strong>, then <strong>Start host &amp; show QR</strong>.</li>
-<li>On OnePlus choose <strong>Camera</strong>, then <strong>Scan host QR &amp; connect</strong>. Scan the iPhone's code. Allow Local Network access on iPhone if asked.</li>
-<li>On OnePlus tap <strong>Generate 20-second sample</strong>, then <strong>Send sample to host</strong>.</li>
-<li>On iPhone wait for <strong>Checksum: verified</strong>, then tap <strong>Play verified sample</strong>. Does the demonstration video play?</li>
-<li>Close playback and tap <strong>Stop session</strong> on both. Swap roles and repeat: OnePlus is Host, iPhone is Camera and sends the sample.</li>
+<li>On iPhone choose <strong>Host</strong>, then <strong>Start host &amp; show QR</strong>. On OnePlus choose <strong>Camera</strong>, then <strong>Scan host QR &amp; connect</strong>. Allow Local Network access if asked.</li>
+<li>Hold Camera sideways, tap <strong>Start rear camera</strong> and wait 25 seconds. Aim at your hand or a moving object.</li>
+<li>On Host tap <strong>Measure phone clocks</strong> and wait for eight samples. Leave automatic playback checked and delay set to <strong>None</strong>. Tap <strong>Request review at this tap</strong>. The recent camera video should arrive and play on Host.</li>
+<li>Close playback. Note Works/Problem and the displayed <strong>Tap → playback started</strong> seconds below. Camera should still be recording. On Host try <strong>Inspect host first frame</strong>, <strong>Host last frame</strong>, Previous and Next; the image and frame number should change.</li>
+<li>Measure clocks again, then request a second review. For the third, select <strong>5 seconds</strong>: hold up one finger in Camera’s view when Host taps, then change to two. The clip should end near the one-finger moment. Close playback between requests.</li>
+<li>Stop recording and stop the session on both. Swap roles and repeat all three reviews.</li>
 </ol>
-<label>OnePlus → iPhone<select data-key="OnePlus to iPhone"></select></label>
-<label>iPhone → OnePlus<select data-key="iPhone to OnePlus"></select></label>
+<label>OnePlus Camera → iPhone Host: three reviews arrive and play<select data-key="OnePlus camera reviews"></select></label>
+<label>iPhone Camera → OnePlus Host: three reviews arrive and play<select data-key="iPhone camera reviews"></select></label>
+<label>Host frame buttons and slower playback work<select data-key="Host inspection and slow playback"></select></label>
+<label>Camera continues recording while Host reviews<select data-key="Camera continues through host reviews"></select></label>
+<label>Displayed playback seconds, if available: three per direction<input data-key="Review seconds" placeholder="OnePlus camera: … / … / … ; iPhone camera: … / … / …"></label>
+<p>If automatic playback fails, note the exact error. Try <strong>Play verified recording review</strong>; mention if you had to do this. A failed or unfinished send must never offer playback.</p>
+<p><strong>One reconnect check:</strong> stop the session on Host only while Camera keeps recording. Start Host again and reconnect using its new manual connection details on Camera (QR scanning requires stopping recording). Measure clocks again and request. Note whether recording continued and whether footage was available. If scanning is needed, stop recording first and report that limitation.</p>
+<label>Reconnect and a fresh review work<select data-key="Reconnect review"></select></label>
+<p><strong>Second settings check:</strong> stop recording, change Camera retention/review to <strong>60 / 10</strong>, start again and wait 15 seconds. Request and play a review on Host. It should contain roughly 10 seconds, plus any short lead-in.</p>
+<label>60 / 10 settings work<select data-key="Second recording settings"></select></label>
+<details><summary>Optional demonstration-video regression</summary><p>Stop recording. On Camera generate and send the 20-second sample. On Host wait for a verified checksum and tap Play verified sample. Repeat after swapping roles.</p>
+<label>OnePlus → iPhone sample<select data-key="OnePlus to iPhone"></select></label>
+<label>iPhone → OnePlus sample<select data-key="iPhone to OnePlus"></select></label></details>
 </section>
 <section>
 <h2>3. Lock or leave the app, then return — on each phone</h2>
@@ -66,9 +78,9 @@ body{font:17px/1.5 system-ui,sans-serif;color:#172330;max-width:760px;margin:24p
 <p id="message" aria-live="polite">Works offline. Entries are saved in this browser when available; use a button above to keep or send your results.</p>
 <textarea id="fallback" readonly hidden aria-label="Results to copy"></textarea>
 </section>
-<p><small>This is a quick functional check, not the 30-minute endurance test. Longer recording, heat/storage measurements and failure scenarios remain follow-up checks for the app owner. Updated 2026-10-06.</small></p>
+<p><small>This is a quick functional check, not the 30-minute endurance test. Longer recording, heat/storage measurements and failure scenarios remain follow-up checks for the app owner. Updated 2026-10-10.</small></p>
 <script>
-const key='cricket-replay-quick-check-v2';
+const key='cricket-replay-quick-check-v3';
 const fields=[...document.querySelectorAll('[data-key]')];
 for(const select of document.querySelectorAll('select')){
   for(const text of ['Not tested','Works','Problem']){const option=document.createElement('option');option.textContent=text;select.append(option);}

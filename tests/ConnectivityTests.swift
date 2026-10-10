@@ -79,6 +79,15 @@ struct ConnectivityTests {
         var reviewEndpoint: Int64 = 0
         var arrival: Double = 0
         camera.onReview = { endpoint, done in reviewEndpoint = endpoint; arrival = LocalSession.nowUs() + 5_000_000; done(nil) }
+        // Protocol fixture only. Actual H.264 host decoding is covered by ReviewFlowTests.
+        host.validateReceivedReview = { _, _ in }
+        camera.exportReview = { done in
+            let copy = FileManager.default.temporaryDirectory.appendingPathComponent("review-protocol-" + UUID().uuidString)
+            try! Data([1, 2, 3]).write(to: copy)
+            done(.success((copy, ["sourceFirstUs": reviewEndpoint - 20_000_000, "sourceLastUs": reviewEndpoint - 33_333,
+                "requestedHostUs": reviewEndpoint, "requestedSourceUs": reviewEndpoint, "endpointErrorUs": -33_333,
+                "frames": 600, "retentionSeconds": 120, "reviewSeconds": 20])))
+        }
         host.measureClock()
         wait("eight clock exchanges", seconds: 10) { (snapshot(host)["clock"] as? [String: Any])?["samples"] as? Int == 8 }
         let clock = snapshot(host)["clock"] as! [String: Any]

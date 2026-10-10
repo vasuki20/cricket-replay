@@ -54,6 +54,7 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("recording-experiment", isDirectory: true)
         super.init()
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent("cricket-review-outgoing"))
     }
     func status(_ done: @escaping ([String: Any]) -> Void) { queue.async { done(self.snapshot()) } }
     func report(_ done: @escaping (Result<String, Error>) -> Void) { queue.async {
@@ -367,6 +368,11 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                     if let target = extractionTiming["requestedSourceUs"] as? Int64, let actual = info["sourceLastUs"] as? Int64 {
                         info["endpointErrorUs"] = actual - target
                     }
+                    if extractionTiming["requestedSourceUs"] != nil {
+                        info["retentionSeconds"] = config.retentionSeconds; info["reviewSeconds"] = config.reviewSeconds
+                        do { _ = try SampleTransfer.recordingMetadata(info) }
+                        catch { extractionFailed(error); return }
+                    }
                     info["state"] = "ready"; info["detail"] = "Clip ready; beginning/middle/end frames decoded"; extraction = info
                     extractionHistory.append(info); if extractionHistory.count > 100 { extractionHistory.removeFirst() }
                     extractDone?(nil); extractDone = nil
@@ -382,6 +388,24 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         extractionHistory.append(extraction); if extractionHistory.count > 100 { extractionHistory.removeFirst() }
         extractDone?(error); extractDone = nil
     }
+    func exportReview(_ done: @escaping (Result<(URL, [String: Any]), Error>) -> Void) { queue.async {
+        var exportedURL: URL?
+        do {
+            guard !self.extracting, self.extraction["ready"] as? Bool == true else { throw RecordingError.invalid("No complete recording clip") }
+            var info = self.extraction
+            info["retentionSeconds"] = self.config.retentionSeconds; info["reviewSeconds"] = self.config.reviewSeconds
+            let metadata = try SampleTransfer.recordingMetadata(info)
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("cricket-review-outgoing")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let copy = folder.appendingPathComponent(UUID().uuidString + ".mp4")
+            exportedURL = copy
+            try FileManager.default.copyItem(at: self.clip, to: copy)
+            done(.success((copy, metadata)))
+        } catch {
+            if let exportedURL { try? FileManager.default.removeItem(at: exportedURL) }
+            done(.failure(error))
+        }
+    } }
     func completedClip(_ done: @escaping (URL?) -> Void) { queue.async {
         done(!self.extracting && self.extraction["ready"] as? Bool == true && FileManager.default.fileExists(atPath: self.clip.path) ? self.clip : nil)
     } }

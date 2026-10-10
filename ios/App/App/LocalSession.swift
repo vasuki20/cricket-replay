@@ -68,7 +68,8 @@ final class SessionAuthentication {
 
 final class LocalSession {
     private let clock: () -> Double
-    init(now: @escaping () -> Double = { LocalSession.nowUs() }) { clock = now }
+    private let transferDirectory: URL?
+    init(now: @escaping () -> Double = { LocalSession.nowUs() }, directory: URL? = nil) { clock = now; transferDirectory = directory }
     private let queue = DispatchQueue(label: "cricket.local-session")
     private var listener: NWListener?
     private var connection: NWConnection?
@@ -79,6 +80,12 @@ final class LocalSession {
     private var clockSamples = 0
     private var bestClock: (Double, Double, Double)? // peer minus local, half network RTT, local measurement time
     var onReview: ((Int64, @escaping (Error?) -> Void) -> Void)?
+    var onReviewCancelled: (() -> Void)?
+    var exportReview: ((@escaping (Result<(URL, [String: Any]), Error>) -> Void) -> Void)?
+    var validateReceivedReview: ((URL, [String: Any]) throws -> Void)?
+    private var preparingReview = false
+    private var mediaInUse = false
+    private var outgoingReview: URL?
     private var authenticated = false
     private var role = "host"
     private var secret = ""
@@ -87,7 +94,7 @@ final class LocalSession {
     private var snapshot: [String: Any] = ["state": "stopped", "detail": "No session", "role": "host", "addresses": [], "pingsReceived": 0, "repliesReceived": 0]
     var onChange: (([String: Any]) -> Void)?
     private lazy var transfer: SampleTransfer = {
-        let engine = SampleTransfer(queue: queue)
+        let engine = SampleTransfer(queue: queue, directory: transferDirectory ?? FileManager.default.temporaryDirectory.appendingPathComponent("cricket-transfer-" + UUID().uuidString))
         engine.onSend = { [weak self] id, packet in
             guard let self, self.authenticated, let auth = self.authentication else { return }
             do {
@@ -95,19 +102,67 @@ final class LocalSession {
                 if let frame = auth.signed(type: "transfer", id: id, payload: payload) { self.send(frame) }
             } catch { self.failPeer(error.localizedDescription) }
         }
-        engine.onChange = { [weak self] state in self?.snapshot["transfer"] = state }
+        engine.acceptOffer = { [weak self] media, id in
+            guard let self, !self.mediaInUse else { throw TransferError.invalid("Close host playback/inspection before sending") }
+            let review = self.snapshot["review"] as? [String: Any]
+            if media == "recording" {
+                guard review?["requestId"] as? String == id, ["requesting", "transferring"].contains(review?["state"] as? String ?? "") else { throw TransferError.invalid("Unexpected or stale recording review") }
+            } else if ["requesting", "transferring"].contains(review?["state"] as? String ?? "") { throw TransferError.invalid("A recorded review is pending") }
+        }
+        engine.validateRecording = { [weak self] url, info in
+            guard let self, let review = self.snapshot["review"] as? [String: Any],
+                  let mapped = review["peerTapUs"] as? NSNumber, let endpoint = info["requestedHostUs"] as? NSNumber,
+                  abs(mapped.doubleValue - endpoint.doubleValue) <= 1 else { throw TransferError.invalid("Recording endpoint does not match the requested tap") }
+            guard let validate = self.validateReceivedReview else { throw TransferError.invalid("Host recording decoder unavailable") }
+            try validate(url, info)
+        }
+        engine.onChange = { [weak self] state in
+            guard let self else { return }
+            self.snapshot["transfer"] = state
+            if state["media"] as? String == "recording", state["state"] as? String == "ready",
+               var review = self.snapshot["review"] as? [String: Any], review["requestId"] as? String == state["reviewId"] as? String {
+                review["state"] = "ready"; review["detail"] = "Recording verified and decoded on host; ready to play"
+                review["verifiedElapsedMs"] = (self.clock() - (review["tapUs"] as? Double ?? self.clock())) / 1000
+                self.snapshot["review"] = review
+                if let id = review["requestId"] as? String { self.pending.removeValue(forKey: id)?.1.cancel() }
+            }
+            if state["state"] as? String == "complete", let url = self.outgoingReview {
+                try? FileManager.default.removeItem(at: url); self.outgoingReview = nil
+            }
+        }
         engine.onFailure = { [weak self] detail in self?.failPeer(detail) }
         return engine
     }()
     func sendSample(_ url: URL, slow: Bool, completion: @escaping (Error?) -> Void) {
         queue.async {
-            guard self.role == "camera", self.authenticated else { completion(TransferError.invalid("Connect camera to host first")); return }
+            guard self.role == "camera", self.authenticated, !self.preparingReview else { completion(TransferError.invalid("Connect camera to host first")); return }
             do { try self.transfer.begin(url, slow: slow); completion(nil) } catch { completion(error) }
         }
     }
-    func completedSample(_ completion: @escaping (URL?) -> Void) { queue.async { completion(self.transfer.completed) } }
+    func completedSample(_ completion: @escaping (URL?) -> Void) { queue.async { completion(self.transfer.state["media"] as? String == "sample" && self.transfer.state["state"] as? String == "ready" ? self.transfer.completed : nil) } }
+    func acquireSample(_ completion: @escaping (URL?) -> Void) { queue.async {
+        guard !self.mediaInUse, !["requesting", "transferring"].contains((self.snapshot["review"] as? [String: Any])?["state"] as? String ?? ""),
+              self.transfer.state["media"] as? String == "sample", self.transfer.state["state"] as? String == "ready", let url = self.transfer.completed else { completion(nil); return }
+        self.mediaInUse = true; completion(url)
+    } }
+    func acquireReview(_ completion: @escaping (URL?, [String: Any]?) -> Void) { queue.async {
+        guard !self.mediaInUse, self.snapshot["review"] as? [String: Any] != nil,
+              (self.snapshot["review"] as? [String: Any])?["state"] as? String == "ready",
+              self.transfer.state["state"] as? String == "ready",
+              self.transfer.state["reviewId"] as? String == (self.snapshot["review"] as? [String: Any])?["requestId"] as? String, let url = self.transfer.completed, let info = self.transfer.recording else { completion(nil, nil); return }
+        self.mediaInUse = true; completion(url, info)
+    } }
+    func releaseMedia() { queue.async { self.mediaInUse = false } }
+    func reviewPlaybackStarted() { queue.async {
+        guard var review = self.snapshot["review"] as? [String: Any], review["state"] as? String == "ready" else { return }
+        if review["tapToPlayMs"] == nil { review["tapToPlayMs"] = (self.clock() - (review["tapUs"] as? Double ?? self.clock())) / 1000 }
+        self.snapshot["review"] = review
+    } }
     func cleanupTransfer(_ completion: @escaping (Error?) -> Void) {
-        queue.async { do { try self.transfer.cleanup(); completion(nil) } catch { completion(error) } }
+        queue.async { do {
+            guard !self.mediaInUse, !self.preparingReview, !["requesting", "transferring"].contains((self.snapshot["review"] as? [String: Any])?["state"] as? String ?? "") else { throw TransferError.invalid("Close playback/inspection and stop or finish the pending review first") }
+            try self.transfer.cleanup(); self.snapshot.removeValue(forKey: "review"); completion(nil)
+        } catch { completion(error) } }
     }
 
     private func publish(_ state: String, _ detail: String) {
@@ -244,19 +299,35 @@ final class LocalSession {
             let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             if type == "status", body?["kind"] as? String == "review" {
                 guard role == "camera", let endpoint = body?["peerTapUs"] as? NSNumber, let onReview else { failPeer("Review receiver unavailable"); return }
+                guard !preparingReview, !transfer.active else {
+                    signed("statusReply", id, payload: Self.json(["kind": "review", "ok": false, "detail": "A review/transfer is already active"])); return
+                }
+                preparingReview = true
                 let token = auth
                 onReview(endpoint.int64Value) { error in self.queue.async {
                     guard self.authentication === token else { return }
-                    let reply: [String: Any] = ["kind": "review", "ok": error == nil, "detail": error?.localizedDescription ?? "Requested clip ready on camera", "peerTapUs": endpoint]
-                    self.signed("statusReply", id, payload: Self.json(reply))
+                    func reply(_ error: Error?) {
+                        self.preparingReview = false
+                        self.signed("statusReply", id, payload: Self.json(["kind": "review", "ok": error == nil, "detail": error?.localizedDescription ?? "Extracted; encrypted recording transfer in progress", "peerTapUs": endpoint]))
+                    }
+                    if let error { reply(error); return }
+                    guard let export = self.exportReview else { reply(TransferError.invalid("Recording export unavailable")); return }
+                    export { result in self.queue.async {
+                        switch result {
+                        case .failure(let error): if self.authentication === token { reply(error) }
+                        case .success(let (url, info)):
+                            guard self.authentication === token else { try? FileManager.default.removeItem(at: url); return }
+                            do { try self.transfer.begin(url, recording: info, reviewId: id); self.outgoingReview = url; reply(nil) }
+                            catch { try? FileManager.default.removeItem(at: url); reply(error) }
+                        }
+                    } }
                 } }
             } else if type == "status", body?["kind"] as? String == "clock" {
                 signed("statusReply", id, payload: Self.json(["kind": "clock", "t2": receivedUs, "t3": self.clock()]))
             } else { signed(type == "ping" ? "pong" : "statusReply", id) }
             publish("connected", "Received authenticated \(type); replied")
         case "pong", "statusReply":
-            guard let request = pending.removeValue(forKey: id) else { failPeer("Unexpected response"); return }
-            request.1.cancel()
+            guard let request = pending[id] else { failPeer("Unexpected response"); return }
             let t4 = self.clock()
             if let data = (frame["payload"] as? String)?.data(using: .utf8),
                let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
@@ -271,10 +342,14 @@ final class LocalSession {
                 } else if body["kind"] as? String == "review" {
                     var review = snapshot["review"] as? [String: Any] ?? [:]
                     for (key, value) in body { review[key] = value }
-                    review["state"] = body["ok"] as? Bool == true ? "ready" : "failed"
+                    if review["state"] as? String != "ready" { review["state"] = body["ok"] as? Bool == true ? "transferring" : "failed" }
                     review["replyElapsedMs"] = (t4 - request.0 * 1_000_000) / 1000
                     snapshot["review"] = review
                 }
+            }
+            if (snapshot["review"] as? [String: Any])?["requestId"] as? String != id ||
+                (snapshot["review"] as? [String: Any])?["state"] as? String == "failed" {
+                pending.removeValue(forKey: id)?.1.cancel()
             }
             snapshot["lastRoundTripMs"] = (self.clock() / 1_000_000 - request.0) * 1000
             snapshot["repliesReceived"] = (snapshot["repliesReceived"] as? Int ?? 0) + 1
@@ -310,7 +385,7 @@ final class LocalSession {
         let tap = self.clock()
         queue.async {
             guard self.role == "host", self.authenticated, self.clockSamples >= 4, let best = self.bestClock,
-                  tap - best.2 < 30_000_000, (0...5000).contains(delayMs), self.pending.isEmpty else {
+                  tap - best.2 < 30_000_000, (0...5000).contains(delayMs), self.pending.isEmpty, !self.transfer.active, !self.mediaInUse else {
                 done(TransferError.invalid("Measure clocks first; wait for replies, then review within 30 seconds")); return
             }
             let id = UUID().uuidString.lowercased(); let token = self.authentication
@@ -320,7 +395,7 @@ final class LocalSession {
             }
             self.pending[id] = (tap / 1_000_000, timeout)
             self.queue.asyncAfter(deadline: .now() + 45, execute: timeout)
-            self.snapshot["review"] = ["kind": "review", "state": "requesting", "tapUs": tap, "peerTapUs": tap + best.0, "uncertaintyUs": best.1, "injectedDelayMs": delayMs]
+            self.snapshot["review"] = ["kind": "review", "requestId": id, "state": "requesting", "tapUs": tap, "peerTapUs": tap + best.0, "uncertaintyUs": best.1, "injectedDelayMs": delayMs]
             self.queue.asyncAfter(deadline: .now() + Double(delayMs) / 1000) {
                 guard self.authentication === token, self.authenticated else { return }
                 self.signed("status", id, payload: Self.json(["kind": "review", "peerTapUs": Int64((tap + best.0).rounded())]))
@@ -329,8 +404,13 @@ final class LocalSession {
         }
     }
     private func failPeer(_ detail: String) {
-        bestClock = nil; clockSamples = 0; snapshot.removeValue(forKey: "clock"); snapshot.removeValue(forKey: "review")
+        bestClock = nil; clockSamples = 0; snapshot.removeValue(forKey: "clock")
+        if preparingReview { onReviewCancelled?() }; preparingReview = false
+        if var review = snapshot["review"] as? [String: Any], ["requesting", "transferring"].contains(review["state"] as? String ?? "") {
+            review["state"] = "failed"; review["detail"] = detail; snapshot["review"] = review
+        }
         transfer.cancel(detail)
+        if let outgoingReview { try? FileManager.default.removeItem(at: outgoingReview) }; outgoingReview = nil
         timeout?.cancel(); timeout = nil
         connection?.stateUpdateHandler = nil; connection?.cancel(); connection = nil
         authentication = nil; authenticated = false; buffer.removeAll()

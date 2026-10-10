@@ -27,6 +27,32 @@ struct TransferTests {
             receiver.receive(id: id, packet: ["kind": "offer", "bytes": SampleTransfer.maxBytes + 1, "sha256": String(repeating: "0", count: 64)], isHost: true)
             require(receiver.state["state"] as? String == "failed", "oversized offer rejected")
         }
+        let lowDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("cricket-low-storage-" + UUID().uuidString)
+        let low = SampleTransfer(queue: queue, directory: lowDirectory, availableBytes: { _ in 0 })
+        queue.sync {
+            low.receive(id: UUID().uuidString, packet: ["kind": "offer", "bytes": 3, "sha256": String(repeating: "0", count: 64)], isHost: true)
+            require(low.state["state"] as? String == "failed" && low.completed == nil, "low storage cannot become ready")
+            require((try? FileManager.default.contentsOfDirectory(atPath: lowDirectory.path).count) == 0, "low storage discards partial")
+            try! low.cleanup()
+            let info: [String: Any] = ["sourceFirstUs": 1_000_000, "sourceLastUs": 20_966_667, "requestedHostUs": 21_000_000,
+                "requestedSourceUs": 21_000_000, "endpointErrorUs": -33_333, "frames": 600, "retentionSeconds": 120, "reviewSeconds": 20]
+            require((try? SampleTransfer.recordingMetadata(info)) != nil, "valid original timing metadata")
+            for (key, value) in [("endpointErrorUs", -500_000), ("frames", 0), ("reviewSeconds", 31), ("sourceLastUs", 2_000_000), ("requestedSourceUs", 21_000_000.5)] as [(String, Any)] {
+                var invalid = info; invalid[key] = value
+                require((try? SampleTransfer.recordingMetadata(invalid)) == nil, "invalid/partial timing rejected: \(key)")
+            }
+            let expected = UUID().uuidString
+            low.validateRecording = { _, _ in }
+            low.acceptOffer = { _, id in if id != expected { throw TransferError.invalid("Unexpected or stale recording review") } }
+            low.receive(id: UUID().uuidString, packet: ["kind": "offer", "bytes": 3, "sha256": String(repeating: "0", count: 64), "media": "recording", "reviewId": UUID().uuidString, "recording": info], isHost: true)
+            require(low.state["state"] as? String == "failed" && low.completed == nil, "stale review rejected before reception")
+            try! low.cleanup()
+            // Startup discards killed-process media instead of restoring ready state.
+            try! FileManager.default.createDirectory(at: lowDirectory, withIntermediateDirectories: true)
+            try! Data([1]).write(to: lowDirectory.appendingPathComponent("stale.part"))
+            let fresh = SampleTransfer(queue: queue, directory: lowDirectory)
+            require(fresh.completed == nil && fresh.state["state"] as? String == "idle" && !FileManager.default.fileExists(atPath: lowDirectory.path), "process restart clears stale partial")
+        }
         let done = DispatchSemaphore(value: 0)
         var generated: Result<URL, Error>?
         SampleVideo.generate { generated = $0; done.signal() }
@@ -42,6 +68,6 @@ struct TransferTests {
         require(playable, "generated MP4 playable")
         require(video.count == 1 && audio.isEmpty, "one video track without audio")
         require(size < SampleTransfer.maxBytes, "sample within transfer limit")
-        print("PASS: checksum gating, corrupted/out-of-order/oversized rejection, partial cleanup, generated playable 20-second silent MP4")
+        print("PASS: checksum gating, corrupted/out-of-order/oversized rejection, low storage, partial/stale timing metadata, process-restart cleanup, generated playable 20-second silent MP4")
     }
 }

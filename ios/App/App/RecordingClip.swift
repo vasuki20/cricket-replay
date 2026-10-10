@@ -2,6 +2,24 @@ import Foundation
 import AVFoundation
 
 enum RecordingClip {
+    static func validateReview(_ url: URL, _ info: [String: Any]) throws {
+        let asset = AVURLAsset(url: url)
+        let tracks = asset.tracks
+        guard tracks.count == 1, tracks[0].mediaType == .video,
+
+              let count = info["frames"] as? NSNumber,
+              let first = info["sourceFirstUs"] as? NSNumber, let last = info["sourceLastUs"] as? NSNumber else { throw RecordingError.invalid("Expected one silent H.264 recording track") }
+        let descriptions = tracks[0].formatDescriptions as! [CMFormatDescription]
+        guard let description = descriptions.first, CMFormatDescriptionGetMediaSubType(description) == kCMVideoCodecType_H264 else { throw RecordingError.invalid("Expected H.264 recording") }
+        for index in [0, count.intValue / 2, count.intValue - 1] {
+            let frame = try inspect(url, index: index)
+            guard frame.count == count.intValue,
+                  index != 0 || abs(frame.timeUs) <= 1,
+                  index != count.intValue - 1 || abs(frame.timeUs - (last.int64Value - first.int64Value)) <= 1 else {
+                throw RecordingError.invalid("Received recording timestamps/frame count do not match source metadata")
+            }
+        }
+    }
     static func inspect(_ url: URL, index: Int) throws -> (image: CGImage, timeUs: Int64, count: Int) {
         let asset = AVURLAsset(url: url)
         guard let track = asset.tracks(withMediaType: .video).first else { throw RecordingError.invalid("No video track") }
@@ -10,7 +28,7 @@ enum RecordingClip {
         while let sample = source.copyNextSampleBuffer() {
             if CMSampleBufferGetNumSamples(sample) == 0 { continue }
             let time = RecordingMedia.microseconds(CMSampleBufferGetPresentationTimeStamp(sample))
-            guard times.count < 10000, times.last == nil || time > times.last! else { throw RecordingError.invalid("Frame order or count unsupported") }
+            guard times.count < 10000, times.last == nil || (time > times.last! && time - times.last! <= 100_000) else { throw RecordingError.invalid("Frame order/count unsupported or recording gap exceeds 100 ms") }
             times.append(time)
         }
         guard reader.status != .failed, times.indices.contains(index) else { throw RecordingError.invalid("Frame index outside recorded clip or reader failed") }
@@ -98,6 +116,7 @@ enum RecordingClip {
                 let copy = try RecordingMedia.retime(sample, ptsUs: pts - base)
                 guard input.append(copy) else { throw writer.error ?? RecordingError.invalid("Cannot append clip frame") }
                 let delta = last < 0 ? 0 : pts - last
+                guard delta <= 100_000 else { throw RecordingError.invalid("Partial footage: recorded frame interval exceeds 100 ms") }
                 maxDelta = max(maxDelta, delta); if delta > 50_000 { gaps += 1 }
                 try log.write(contentsOf: Data("\(frames),\(pts),\(pts - base),\(delta),\(segment.url.lastPathComponent)\n".utf8))
                 frameTimes.append(pts - base); frames += 1; last = pts

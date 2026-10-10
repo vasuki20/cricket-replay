@@ -18,6 +18,7 @@ import java.util.concurrent.Executors
 // One Camera2 repeating request and one encoder per run. Only muxers rotate at sync frames.
 // All capture state, buffer mutations and codec callbacks belong to this Handler.
 internal class RollingRecording(private val context: Context, private val captureEnded: () -> Unit = {}) {
+    init { File(context.cacheDir, "cricket-review-outgoing").deleteRecursively() }
     companion object {
         const val SEGMENT_US = 5_000_000L
         const val MAX_DISK_BYTES = 256L * 1024 * 1024
@@ -340,6 +341,11 @@ internal class RollingRecording(private val context: Context, private val captur
                     if (error == null) {
                         extractionTiming.keys().forEach { key -> result?.put(key, extractionTiming.get(key)) }
                         if (extractionTiming.has("requestedSourceUs")) result?.put("endpointErrorUs", result!!.getLong("sourceLastUs") - extractionTiming.getLong("requestedSourceUs"))
+                        if (extractionTiming.has("requestedSourceUs")) {
+                            result!!.put("retentionSeconds", config.retentionSeconds).put("reviewSeconds", config.reviewSeconds)
+                            try { SampleTransfer.recordingMetadata(result!!) }
+                            catch (failure: Exception) { extractionFailed(failure); return@post }
+                        }
                         extraction = checkNotNull(result).put("state", "ready").put("detail", "Clip ready; beginning/middle/end frames decoded")
                         extractionHistory.put(JSONObject(extraction.toString())); if (extractionHistory.length() > 100) extractionHistory.remove(0)
                         pendingDone?.invoke(null); pendingDone = null
@@ -356,6 +362,17 @@ internal class RollingRecording(private val context: Context, private val captur
         extractionHistory.put(JSONObject(extraction.toString())); if (extractionHistory.length() > 100) extractionHistory.remove(0)
         pendingDone?.invoke(error); pendingDone = null
     }
+    fun exportReview(done: (File?, JSONObject?, Exception?) -> Unit) { handler.post {
+        var copy: File? = null
+        try {
+            check(!extracting && extraction.optBoolean("ready")) { "No complete recording clip" }
+            val metadata = SampleTransfer.recordingMetadata(JSONObject(extraction.toString()).put("retentionSeconds", config.retentionSeconds).put("reviewSeconds", config.reviewSeconds))
+            val folder = File(context.cacheDir, "cricket-review-outgoing").apply { check(isDirectory || mkdirs()) }
+            copy = File.createTempFile("review-", ".mp4", folder)
+            clip.copyTo(copy, overwrite = true)
+            done(copy, metadata, null)
+        } catch (error: Exception) { copy?.delete(); done(null, null, error) }
+    } }
     fun completedClip(done: (File?) -> Unit) { handler.post { done(if (!extracting && extraction.optBoolean("ready") && clip.exists()) clip else null) } }
     fun stop(reason: String = "Stopped by user", done: () -> Unit = {}) { handler.post {
         if (state !in listOf("starting", "recording")) { done(); return@post }

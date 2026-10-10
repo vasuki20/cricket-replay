@@ -3,7 +3,12 @@ export interface Diagnostics {
   platform: 'ios' | 'android'; appVersion: string; osVersion: string;
   cameraPermission: string;
 }
+export interface ReviewClipMetadata extends RecordingConfig {
+  sourceFirstUs: number; sourceLastUs: number; requestedHostUs: number;
+  requestedSourceUs: number; endpointErrorUs: number; frames: number;
+}
 export interface TransferStatus {
+  media?: "sample" | "recording"; reviewId?: string; recording?: ReviewClipMetadata;
   state: string; detail?: string; requestId?: string; bytes: number; totalBytes: number;
   sha256?: string; checksumVerified: boolean; durationSeconds?: number; throughputMBps?: number; attempts?: TransferStatus[];
 }
@@ -29,16 +34,18 @@ export interface RecordingStatus extends RecordingConfig {
     rotationDegrees?: number; fallback?: string; sensorMetric?: string; supportedSizes?: string[]; supportedFpsRanges?: string[] };
   extraction: RecordingClipStatus;
 }
-export interface RecordedFrame { index: number; frameCount: number; timestampUs: number; width: number; height: number; pngBase64: string; }
+export interface RecordedFrame { index: number; frameCount: number; timestampUs: number; sourceTimestampUs?: number; width: number; height: number; pngBase64: string; }
 export interface SessionStatus {
   clock?: { samples: number; offsetUs: number; uncertaintyUs: number; measuredAtUs: number };
-  review?: { state?: string; ok?: boolean; detail?: string; tapUs?: number; peerTapUs?: number; uncertaintyUs?: number; injectedDelayMs?: number; replyElapsedMs?: number };
+  review?: { requestId?: string; verifiedElapsedMs?: number; tapToPlayMs?: number; state?: string; ok?: boolean; detail?: string; tapUs?: number; peerTapUs?: number; uncertaintyUs?: number; injectedDelayMs?: number; replyElapsedMs?: number };
   transfer?: TransferStatus;
   state: string; detail: string; role: string; authenticated: boolean;
   addresses: string[]; port?: number; pingsReceived: number; repliesReceived: number;
   lastRoundTripMs?: number;
 }
 export const Feasibility = registerPlugin<{
+  playReceivedReview(options: { rate: number }): Promise<void>;
+  inspectReceivedReviewFrame(options: { index: number }): Promise<RecordedFrame>;
   measureReviewClock(): Promise<void>;
   requestTimedReview(options: { delayMs: number }): Promise<void>;
   inspectRecordingFrame(options: { index: number }): Promise<RecordedFrame>;

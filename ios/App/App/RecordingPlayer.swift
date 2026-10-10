@@ -6,8 +6,9 @@ final class RecordingPlayer: AVPlayerViewController {
     private var observation: NSKeyValueObservation?
     private var timeout: DispatchWorkItem?
     private var completion: ((String?) -> Void)?
-    init(url: URL, rate: Float = 1, completion: @escaping (String?) -> Void) {
-        self.completion = completion
+    private var closed: (() -> Void)?
+    init(url: URL, rate: Float = 1, closed: (() -> Void)? = nil, completion: @escaping (String?) -> Void) {
+        self.completion = completion; self.closed = closed
         super.init(nibName: nil, bundle: nil)
         modalPresentationStyle = .fullScreen
         let item = AVPlayerItem(url: url); player = AVPlayer(playerItem: item)
@@ -30,7 +31,7 @@ final class RecordingPlayer: AVPlayerViewController {
         timeout = work; DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
     }
     override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated); player?.pause(); observation = nil; settle("Recording playback closed before preparation")
+        super.viewDidDisappear(animated); player?.pause(); observation = nil; settle("Recording playback closed before preparation"); closed?(); closed = nil
     }
     private func settle(_ error: String?) { timeout?.cancel(); timeout = nil; let done = completion; completion = nil; done?(error) }
 }

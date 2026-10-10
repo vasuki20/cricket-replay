@@ -29,7 +29,7 @@ xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Debug \
   CODE_SIGNING_ALLOWED=NO build
 xcrun swiftc -swift-version 5 -D RECORDING_TEST \
   ios/App/App/RecordingBuffer.swift ios/App/App/RecordingClip.swift \
-  ios/App/App/RollingRecording.swift tests/RecordingTests.swift \
+  ios/App/App/RollingRecording.swift ios/App/App/SampleTransfer.swift tests/RecordingTests.swift \
   -o /private/tmp/cricket-recording-tests
 /private/tmp/cricket-recording-tests
 ```

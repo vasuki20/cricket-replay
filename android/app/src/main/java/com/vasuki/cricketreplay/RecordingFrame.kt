@@ -11,17 +11,27 @@ import org.json.JSONObject
 
 // Worker-only: index actual compressed sample PTS, decode an actual presentation frame.
 internal object RecordingFrame {
+    fun validateReview(file: File, info: JSONObject) {
+        val count = info.getInt("frames")
+        for (index in listOf(0, count / 2, count - 1)) {
+            val frame = inspect(file, index)
+            check(frame.getInt("frameCount") == count &&
+                (index != 0 || kotlin.math.abs(frame.getLong("timestampUs")) <= 1) &&
+                (index != count - 1 || kotlin.math.abs(frame.getLong("timestampUs") - (info.getLong("sourceLastUs") - info.getLong("sourceFirstUs"))) <= 1)) { "Received recording timestamps/frame count do not match source metadata" }
+        }
+    }
     fun inspect(file: File, index: Int): JSONObject {
         check(Build.VERSION.SDK_INT >= 28) { "Recorded frame inspection requires Android 9 or later" }
         val times = mutableListOf<Long>()
         val source = MediaExtractor()
         try {
             source.setDataSource(file.path)
+            check(source.trackCount == 1 && source.getTrackFormat(0).getString("mime") == "video/avc") { "Expected one silent H.264 recording track" }
             val track = (0 until source.trackCount).firstOrNull { source.getTrackFormat(it).getString("mime")?.startsWith("video/") == true } ?: error("No video track")
             source.selectTrack(track)
             while (source.sampleTime >= 0) {
                 val pts = source.sampleTime
-                check(times.isEmpty() || pts > times.last()) { "Frame order unsupported by this inspector" }
+                check(times.isEmpty() || (pts > times.last() && pts - times.last() <= 100_000)) { "Frame order unsupported or recording gap exceeds 100 ms" }
                 check(times.size < 10000) { "Inspection exceeds experiment frame bound" }
                 times.add(pts)
                 if (!source.advance()) break

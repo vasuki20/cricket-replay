@@ -32,6 +32,12 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
     private var clockSamples = 0
     private var bestClock: Triple<Double, Double, Double>? = null
     var onReview: ((Long, (Exception?) -> Unit) -> Unit)? = null
+    var onReviewCancelled: (() -> Unit)? = null
+    var exportReview: (((File?, JSONObject?, Exception?) -> Unit) -> Unit)? = null
+    var validateReceivedReview: ((File, JSONObject) -> Unit)? = null
+    private var preparingReview = false
+    private var mediaInUse = false
+    private var outgoingReview: File? = null
     private var snapshot = emptySnapshot()
     private val transfer = SampleTransfer(queue, directory).apply {
         onSend = { id, packet ->
@@ -40,6 +46,26 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
                 val authentication = checkNotNull(auth)
                 send(authentication.signed("transfer", id, authentication.encrypt(packet, id)))
             } catch (error: Exception) { failPeer(error.message ?: "Cannot encrypt transfer") }
+        }
+        acceptOffer = { media, id ->
+            check(!mediaInUse) { "Close host playback/inspection before sending" }
+            val review = snapshot.optJSONObject("review")
+            if (media == "recording") check(review?.optString("requestId") == id && review.optString("state") in listOf("requesting", "transferring")) { "Unexpected or stale recording review" }
+            else check(review?.optString("state") !in listOf("requesting", "transferring")) { "A recorded review is pending" }
+        }
+        validateRecording = { file, info ->
+            val review = checkNotNull(snapshot.optJSONObject("review")) { "No pending review" }
+            check(kotlin.math.abs(review.getDouble("peerTapUs") - info.getDouble("requestedHostUs")) <= 1) { "Recording endpoint does not match the requested tap" }
+            checkNotNull(validateReceivedReview) { "Host recording decoder unavailable" }.invoke(file, info)
+        }
+        onChange = { state ->
+            val review = snapshot.optJSONObject("review")
+            if (state.optString("media") == "recording" && state.optString("state") == "ready" && review?.optString("requestId") == state.optString("reviewId")) {
+                review.put("state", "ready").put("detail", "Recording verified and decoded on host; ready to play")
+                    .put("verifiedElapsedMs", (nowUs() - review.getDouble("tapUs")) / 1000)
+                pending.remove(review.getString("requestId"))?.second?.cancel(false)
+            }
+            if (state.optString("state") == "complete") { outgoingReview?.delete(); outgoingReview = null }
         }
         onFailure = { failPeer(it) }
     }
@@ -52,13 +78,25 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
     fun status(done: (JSONObject) -> Unit) { queue.execute { snapshot.put("transfer", transfer.state); done(JSONObject(snapshot.toString())) } }
     fun sendSample(file: File, slow: Boolean, done: (Exception?) -> Unit) { queue.execute {
         try {
-            check(role == "camera" && authenticated) { "Connect camera to host first" }
+            check(role == "camera" && authenticated && !preparingReview) { "Connect camera to host first" }
             transfer.begin(file, slow); done(null)
         } catch (error: Exception) { done(error) }
     } }
-    fun completedSample(done: (File?) -> Unit) { queue.execute { done(transfer.completed) } }
+    fun completedSample(done: (File?) -> Unit) { queue.execute { done(if (transfer.state.optString("media") == "sample" && transfer.state.optString("state") == "ready") transfer.completed else null) } }
+    fun acquireSample(done: (File?) -> Unit) { queue.execute {
+        if (mediaInUse || snapshot.optJSONObject("review")?.optString("state") in listOf("requesting", "transferring") || transfer.state.optString("media") != "sample" || transfer.state.optString("state") != "ready" || transfer.completed == null) { done(null); return@execute }
+        mediaInUse = true; done(transfer.completed)
+    } }
+    fun acquireReview(done: (File?, JSONObject?) -> Unit) { queue.execute {
+        if (mediaInUse || snapshot.optJSONObject("review")?.optString("state") != "ready" || transfer.state.optString("state") != "ready" || transfer.completed == null || transfer.recording == null || transfer.state.optString("reviewId") != snapshot.optJSONObject("review")?.optString("requestId")) { done(null, null); return@execute }
+        mediaInUse = true; done(transfer.completed, transfer.recording)
+    } }
+    fun releaseMedia() { queue.execute { mediaInUse = false } }
+    fun reviewPlaybackStarted() { queue.execute {
+        snapshot.optJSONObject("review")?.let { if (it.optString("state") == "ready" && !it.has("tapToPlayMs")) it.put("tapToPlayMs", (nowUs() - it.getDouble("tapUs")) / 1000) }
+    } }
     fun cleanupTransfer(done: (Exception?) -> Unit) { queue.execute {
-        try { transfer.cleanup(); done(null) } catch (error: Exception) { done(error) }
+        try { check(!mediaInUse && !preparingReview && snapshot.optJSONObject("review")?.optString("state") !in listOf("requesting", "transferring")) { "Close playback/inspection and stop or finish the pending review first" }; transfer.cleanup(); snapshot.remove("review"); done(null) } catch (error: Exception) { done(error) }
     } }
     fun startHost(secret: String, port: Int, done: (Exception?) -> Unit) { queue.execute {
         reset(); role = "host"; this.secret = secret
@@ -156,10 +194,26 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
                     when {
                         type == "status" && body?.optString("kind") == "review" -> {
                             check(role == "camera" && onReview != null) { "Review receiver unavailable" }
+                            if (preparingReview || transfer.active) {
+                                signed("statusReply", id, JSONObject().put("kind", "review").put("ok", false).put("detail", "A review/transfer is already active").toString()); return
+                            }
+                            preparingReview = true
                             val endpoint = body.getLong("peerTapUs"); val token = auth
                             onReview!!.invoke(endpoint) { error -> post {
-                                if (auth === token) signed("statusReply", id, JSONObject().put("kind", "review").put("ok", error == null)
-                                    .put("detail", error?.message ?: "Requested clip ready on camera").put("peerTapUs", endpoint).toString())
+                                if (auth !== token) return@post
+                                fun reply(failure: Exception?) {
+                                    preparingReview = false
+                                    signed("statusReply", id, JSONObject().put("kind", "review").put("ok", failure == null)
+                                        .put("detail", failure?.message ?: "Extracted; encrypted recording transfer in progress").put("peerTapUs", endpoint).toString())
+                                }
+                                if (error != null) reply(error)
+                                else if (exportReview == null) reply(IllegalStateException("Recording export unavailable"))
+                                else exportReview!!.invoke { file, info, failure -> post {
+                                    if (auth !== token) { file?.delete() }
+                                    else if (failure != null) reply(failure)
+                                    else try { transfer.begin(checkNotNull(file), info = checkNotNull(info), reviewId = id); outgoingReview = file; reply(null) }
+                                    catch (e: Exception) { file?.delete(); reply(e) }
+                                } }
                             } }
                         }
                         type == "status" && body?.optString("kind") == "clock" -> signed("statusReply", id, JSONObject().put("kind", "clock").put("t2", t2).put("t3", nowUs()).toString())
@@ -168,8 +222,7 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
                     publish("connected", "Received authenticated $type; replied")
                 }
                 "pong", "statusReply" -> {
-                    val request = pending.remove(id) ?: error("Unexpected response")
-                    request.second.cancel(false)
+                    val request = pending[id] ?: error("Unexpected response")
                     val t4 = nowUs(); val body = runCatching { JSONObject(frame.optString("payload")) }.getOrNull()
                     if (body?.optString("kind") == "clock") {
                         val t1 = request.first / 1000.0; val t2 = body.getDouble("t2"); val t3 = body.getDouble("t3")
@@ -180,9 +233,11 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
                     } else if (body?.optString("kind") == "review") {
                         val review = snapshot.optJSONObject("review") ?: JSONObject()
                         body.keys().forEach { key -> review.put(key, body.get(key)) }
-                        review.put("state", if (body.optBoolean("ok")) "ready" else "failed").put("replyElapsedMs", (t4 - request.first / 1000.0) / 1000)
+                        if (review.optString("state") != "ready") review.put("state", if (body.optBoolean("ok")) "transferring" else "failed")
+                        review.put("replyElapsedMs", (t4 - request.first / 1000.0) / 1000)
                         snapshot.put("review", review)
                     }
+                    if (snapshot.optJSONObject("review")?.optString("requestId") != id || snapshot.optJSONObject("review")?.optString("state") == "failed") pending.remove(id)?.second?.cancel(false)
                     snapshot.put("lastRoundTripMs", (nowUs() - request.first / 1000.0) / 1000.0)
                         .put("repliesReceived", snapshot.getInt("repliesReceived") + 1)
                     publish("connected", "Received authenticated $type")
@@ -207,20 +262,22 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
         val tap = nowUs()
         queue.execute {
             val best = bestClock
-            if (role != "host" || !authenticated || clockSamples < 4 || best == null || tap - best.third >= 30_000_000 || delayMs !in 0..5000 || pending.isNotEmpty()) {
+            if (role != "host" || !authenticated || clockSamples < 4 || best == null || tap - best.third >= 30_000_000 || delayMs !in 0..5000 || pending.isNotEmpty() || transfer.active || mediaInUse) {
                 done(IllegalStateException("Measure clocks first; wait for replies, then review within 30 seconds")); return@execute
             }
             val id = UUID.randomUUID().toString(); val token = auth
             val timeout = queue.schedule({ if (pending.containsKey(id)) failPeer("Timed review expired; reconnect") }, 45, TimeUnit.SECONDS)
             pending[id] = Pair((tap * 1000).toLong(), timeout)
-            snapshot.put("review", JSONObject().put("kind", "review").put("state", "requesting").put("tapUs", tap).put("peerTapUs", tap + best.first).put("uncertaintyUs", best.second).put("injectedDelayMs", delayMs))
+            snapshot.put("review", JSONObject().put("kind", "review").put("requestId", id).put("state", "requesting").put("tapUs", tap).put("peerTapUs", tap + best.first).put("uncertaintyUs", best.second).put("injectedDelayMs", delayMs))
             queue.schedule({ if (authenticated && auth === token) signed("status", id, JSONObject().put("kind", "review").put("peerTapUs", (tap + best.first).toLong()).toString()) }, delayMs.toLong(), TimeUnit.MILLISECONDS)
             done(null)
         }
     }
     private fun failPeer(detail: String) {
-        clockSamples = 0; bestClock = null; snapshot.remove("clock"); snapshot.remove("review")
-        transfer.cancel(detail)
+        clockSamples = 0; bestClock = null; snapshot.remove("clock")
+        if (preparingReview) onReviewCancelled?.invoke(); preparingReview = false
+        snapshot.optJSONObject("review")?.let { if (it.optString("state") in listOf("requesting", "transferring")) it.put("state", "failed").put("detail", detail) }
+        transfer.cancel(detail); outgoingReview?.delete(); outgoingReview = null
         handshakeTimeout?.cancel(false); handshakeTimeout = null
         runCatching { socket?.close() }; socket = null; auth = null; authenticated = false
         pending.values.forEach { it.second.cancel(false) }; pending.clear(); writer.queue.clear()

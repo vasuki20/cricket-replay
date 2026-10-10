@@ -7,7 +7,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
   selector: 'replay-app', standalone: true,
   template: `
     <main>
-      <header><p class="eyebrow">CRICKET REPLAY · P0-05 / P0-06</p><h1>Feasibility harness</h1>
+      <header><p class="eyebrow">CRICKET REPLAY · P0-08</p><h1>Feasibility harness</h1>
         <p>Local experiments on real phones. Players make the decisions.</p></header>
       <section><h2>Phone role</h2><div class="roles">
         <button [disabled]="sessionActive() || networkBusy()" [attr.aria-pressed]="role() === 'host'" (click)="role.set('host')">Host</button>
@@ -79,18 +79,35 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
         </div>
         @if (runtime === 'ios') { <p>Local Network access is requested by outgoing connections; a listening host alone may not show a prompt. Permission errors require checking Settings.</p> }
         @else { <p>Join Wi-Fi manually. Android camera connections use the Wi-Fi network; QR scanning requires camera permission.</p> }
-        <p>Status messages are authenticated; sample video packets are encrypted. Backgrounding stops the session; restart after returning.</p>
+        <p>Status messages are authenticated; sample and recording video packets are encrypted. Backgrounding stops the session; restart after returning.</p>
       </section>
-      <section><h2>Review timing experiment</h2>
+      <section><h2>Camera-to-host review</h2>
         <p>Pair first, then start recording on the Camera phone. Clock measurement uses eight authenticated exchanges. Review stays anchored to the native tap timestamp, even with delivery delay.</p>
-        <button [disabled]="!session()?.authenticated" (click)="timingAction('measure')">Measure phone clocks</button>
+        <button [disabled]="!session()?.authenticated || reviewPending()" (click)="timingAction('measure')">Measure phone clocks</button>
         @if (session()?.clock; as c) { <p>{{ c.samples }} samples · peer minus this phone {{ (c.offsetUs / 1000).toFixed(2) }} ms · network uncertainty ±{{ (c.uncertaintyUs / 1000).toFixed(2) }} ms</p> }
         @if (role() === 'host') {
           <label>Injected request delay<select [value]="reviewDelayMs()" (change)="reviewDelayMs.set(+$any($event.target).value)"><option value="0">None</option><option value="2000">2 seconds</option><option value="5000">5 seconds</option></select></label>
-          <button [disabled]="!session()?.authenticated || (session()?.clock?.samples ?? 0) < 4" (click)="timingAction('review')">Request review at this tap</button>
-          <p>The clip is extracted and inspected on the Camera phone. Camera-clip transfer is the next integration experiment.</p>
+          <button [disabled]="!session()?.authenticated || (session()?.clock?.samples ?? 0) < 4 || reviewPending() || transferActive() || hostReviewBusy()" (click)="timingAction('review')">Request review at this tap</button>
+          <label><input type="checkbox" [checked]="autoPlayReview()" (change)="autoPlayReview.set($any($event.target).checked)"> Play automatically when the recording is verified</label>
+          <label>Host playback speed<select [value]="hostPlaybackRate()" (change)="hostPlaybackRate.set(+$any($event.target).value)"><option value="1">1×</option><option value="0.5">0.5×</option><option value="0.25">0.25×</option></select></label>
+          <button [disabled]="!hostReviewReady() || hostReviewBusy()" (click)="playHostReview()">Play verified recording review</button>
+          <button [disabled]="!hostReviewReady() || hostReviewBusy()" (click)="inspectHostFrame(0)">Inspect host first frame</button>
+          <button [disabled]="!hostReviewReady() || !hostFrame() || hostReviewBusy()" (click)="inspectHostFrame(hostFrame()!.frameCount - 1)">Host last frame</button>
+          <button [disabled]="!hostReviewReady() || !hostFrame() || hostReviewBusy() || hostFrame()!.index === 0" (click)="inspectHostFrame(hostFrame()!.index - 1)">Host previous frame</button>
+          <button [disabled]="!hostReviewReady() || !hostFrame() || hostReviewBusy() || hostFrame()!.index + 1 >= hostFrame()!.frameCount" (click)="inspectHostFrame(hostFrame()!.index + 1)">Host next frame</button>
+          @if (hostFrame(); as f) { <figure><img style="max-width:100%" [src]="'data:image/png;base64,' + f.pngBase64" alt="Actual recorded frame received from Camera"><figcaption>Frame {{ f.index + 1 }} / {{ f.frameCount }} · clip PTS {{ f.timestampUs }} µs · original Camera PTS {{ f.sourceTimestampUs }} µs</figcaption></figure> }
+          <p>Camera keeps recording during extraction and encrypted transfer. Host playback waits for the checksum and recorded-frame decoding checks. Close playback before another request.</p>
+        }
+        @if (session()?.transfer?.media === 'recording') {
+          <p>{{ session()?.transfer?.state }} · {{ session()?.transfer?.detail }}</p>
+          <progress [value]="session()?.transfer?.bytes ?? 0" [max]="session()?.transfer?.totalBytes || 1"></progress>
+          <p>{{ session()?.transfer?.bytes }} / {{ session()?.transfer?.totalBytes }} bytes · Checksum: {{ session()?.transfer?.checksumVerified ? 'verified' : 'pending' }}</p>
+          @if (session()?.transfer?.recording; as m) { <p>Camera source {{ m.sourceFirstUs }}–{{ m.sourceLastUs }} µs · final frame minus mapped tap {{ m.endpointErrorUs }} µs · configuration {{ m.retentionSeconds }} / {{ m.reviewSeconds }} s</p> }
         }
         @if (session()?.review; as r) { <p>{{ r.detail ?? r.state }} · tap {{ r.peerTapUs }} µs · injected delay {{ r.injectedDelayMs ?? 0 }} ms</p> }
+        @if (session()?.review?.verifiedElapsedMs !== undefined) { <p>Tap → verified host clip: {{ (session()!.review!.verifiedElapsedMs! / 1000).toFixed(2) }} s</p> }
+        @if (session()?.review?.tapToPlayMs !== undefined) { <p>Tap → playback started: {{ (session()!.review!.tapToPlayMs! / 1000).toFixed(2) }} s · target ≤30 s (includes delivery delay and any wait before Play)</p> }
+        <p>If a review fails, close playback, reconnect if needed, measure clocks and request again. Retry uses a new tap and transfers from the beginning; unavailable footage is an error.</p>
         @if (timingError()) { <p class="error" role="alert">{{ timingError() }}</p> }
         <p>Measure again after reconnect or after 30 seconds. Network uncertainty excludes sensor exposure/clock drift and bridge scheduling; this is not frame-perfect synchronization.</p>
       </section>
@@ -103,11 +120,11 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
           <label><input type="checkbox" [checked]="slowTransfer()" [disabled]="transferActive()" (change)="slowTransfer.set($any($event.target).checked)"> Slow transfer for interruption test</label>
           <button [disabled]="!sample().ready || !session()?.authenticated || transferBusy() || transferActive()" (click)="sampleAction('send')">Send sample to host</button>
         } @else {
-          <button [disabled]="session()?.transfer?.state !== 'ready' || !session()?.transfer?.checksumVerified || transferBusy()" (click)="sampleAction('play')">Play verified sample</button>
+          <button [disabled]="reviewPending() || hostReviewBusy() || session()?.transfer?.media !== 'sample' || session()?.transfer?.state !== 'ready' || !session()?.transfer?.checksumVerified || transferBusy()" (click)="sampleAction('play')">Play verified sample</button>
         }
-        <button [disabled]="!networkSupported || transferBusy() || transferActive()" (click)="sampleAction('cleanup')">Delete temporary samples</button>
+        <button [disabled]="!networkSupported || transferBusy() || transferActive() || reviewPending() || hostReviewBusy()" (click)="sampleAction('cleanup')">Delete temporary samples and reviews</button>
         @if (transferBusy()) { <p>Working…</p> }
-        @if (session()?.transfer; as t) {
+        @if (session()?.transfer?.media !== 'recording') { @if (session()?.transfer; as t) {
           <p>{{ t.state }} · {{ t.detail }}</p>
           <progress [value]="t.bytes" [max]="t.totalBytes || 1"></progress>
           <p>{{ t.bytes }} / {{ t.totalBytes }} bytes · Checksum: {{ t.checksumVerified ? 'verified' : 'pending' }}</p>
@@ -116,6 +133,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
           @for (attempt of t.attempts ?? []; track attempt.requestId) {
             <p>{{ attempt.requestId }}: {{ attempt.totalBytes }} bytes in {{ attempt.durationSeconds?.toFixed(2) }} s · {{ attempt.throughputMBps?.toFixed(2) }} MB/s</p>
           }
+        }
         }
         @if (transferError()) { <p class="error" role="alert">{{ transferError() }}</p> }
         <p>Repeat Send sample three times. To test interruption, enable slow transfer and stop the session partway through; reconnect and retry. Partial files cannot be played.</p>
@@ -164,7 +182,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus,
           @if (r.extraction.endpointErrorUs !== undefined) { <p>Actual final frame minus mapped tap: {{ (r.extraction.endpointErrorUs! / 1000).toFixed(3) }} ms</p> }
           <details><summary>Recording diagnostics (no footage or paths)</summary><pre>{{ recordingReport() }}</pre></details>
         }
-        <p>Timestamp intervals above 50 ms flag investigation; they do not prove a visible gap. Inspect a moving subject or timer across clip boundaries. Backgrounding stops capture. Clips stay on this phone.</p>
+        <p>Timestamp intervals above 50 ms flag investigation; they do not prove a visible gap. Inspect a moving subject or timer across clip boundaries. Backgrounding stops capture. Host review requests send the extracted clip over the paired local connection.</p>
       }
       </section>
     </main>`
@@ -183,6 +201,27 @@ class App implements OnDestroy {
   readonly playbackRate = signal(1);
   readonly reviewDelayMs = signal(0);
   readonly timingError = signal('');
+  readonly autoPlayReview = signal(true);
+  readonly hostPlaybackRate = signal(1);
+  readonly hostFrame = signal<RecordedFrame | null>(null);
+  readonly hostReviewBusy = signal(false);
+  private autoReviewId = '';
+  reviewPending() { return ['requesting', 'transferring'].includes(this.session()?.review?.state ?? ''); }
+  hostReviewReady() { const s = this.session(); return s?.review?.state === 'ready' && s.transfer?.media === 'recording' && s.transfer.state === 'ready' && s.transfer.checksumVerified && s.review.requestId === s.transfer.reviewId; }
+  async playHostReview() {
+    if (this.hostReviewBusy()) return;
+    this.hostReviewBusy.set(true); this.timingError.set('');
+    try { await Feasibility.playReceivedReview({ rate: this.hostPlaybackRate() }); }
+    catch (error) { this.timingError.set(error instanceof Error ? error.message : String(error)); }
+    finally { this.hostReviewBusy.set(false); }
+  }
+  async inspectHostFrame(index: number) {
+    if (this.hostReviewBusy()) return;
+    this.hostReviewBusy.set(true); this.timingError.set('');
+    try { this.hostFrame.set(await Feasibility.inspectReceivedReviewFrame({ index })); }
+    catch (error) { this.hostFrame.set(null); this.timingError.set(error instanceof Error ? error.message : String(error)); }
+    finally { this.hostReviewBusy.set(false); }
+  }
   readonly frame = signal<RecordedFrame | null>(null);
   readonly frameBusy = signal(false);
   readonly frameError = signal('');
@@ -190,7 +229,12 @@ class App implements OnDestroy {
     this.timingError.set('');
     try {
       if (action === 'measure') await Feasibility.measureReviewClock();
-      else await Feasibility.requestTimedReview({ delayMs: this.reviewDelayMs() });
+      else {
+        this.hostFrame.set(null); this.autoReviewId = '';
+        await Feasibility.requestTimedReview({ delayMs: this.reviewDelayMs() });
+        const status = await Feasibility.sessionStatus(); this.session.set(status);
+        if (this.autoPlayReview()) this.autoReviewId = status.review?.requestId ?? '';
+      }
     } catch (error) { this.timingError.set(error instanceof Error ? error.message : String(error)); }
   }
   async inspectFrame(index: number) {
@@ -291,7 +335,14 @@ class App implements OnDestroy {
   private async refresh() {
     if (this.polling) return;
     this.polling = true;
-    try { this.session.set(await Feasibility.sessionStatus()); if (this.transferSupported) this.sample.set(await Feasibility.sampleStatus()); await this.refreshQR(); }
+    try {
+      const status = await Feasibility.sessionStatus();
+      if (status.review?.requestId !== this.session()?.review?.requestId || status.transfer?.requestId !== this.session()?.transfer?.requestId || status.review?.state !== 'ready') this.hostFrame.set(null);
+      this.session.set(status);
+      if (this.autoReviewId && status.review?.requestId === this.autoReviewId) {
+        if (status.review.state === 'ready') { this.autoReviewId = ''; void this.playHostReview(); }
+        else if (status.review.state === 'failed') this.autoReviewId = '';
+      } if (this.transferSupported) this.sample.set(await Feasibility.sampleStatus()); await this.refreshQR(); }
     catch (error) { this.networkError.set(error instanceof Error ? error.message : String(error)); }
     finally {
       if (this.recordingSupported) {

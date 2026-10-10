@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import CoreFoundation
 
 enum TransferError: LocalizedError {
     case invalid(String)
@@ -12,6 +13,7 @@ final class SampleTransfer {
     static let maxBytes = 32 * 1024 * 1024
     private let queue: DispatchQueue
     private let directory: URL
+    private let availableBytes: (URL) throws -> Int
     private var handle: FileHandle?
     private var partial: URL?
     private(set) var completed: URL?
@@ -25,6 +27,33 @@ final class SampleTransfer {
     private var sending = false
     private var slow = false
     private var phase = "idle"
+    private var media = "sample"
+    private(set) var recording: [String: Any]?
+    private var reviewID = ""
+    var acceptOffer: ((String, String) throws -> Void)?
+    var validateRecording: ((URL, [String: Any]) throws -> Void)?
+    // Only explicit, bounded integer timing fields are accepted across platforms.
+    static func recordingMetadata(_ input: [String: Any]) throws -> [String: Any] {
+        var result: [String: Any] = [:]
+        for key in ["sourceFirstUs", "sourceLastUs", "requestedHostUs", "requestedSourceUs", "endpointErrorUs", "frames", "retentionSeconds", "reviewSeconds"] {
+            guard let value = input[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+                  value.doubleValue.isFinite, value.doubleValue.rounded() == value.doubleValue,
+                  abs(value.doubleValue) <= 9_007_199_254_740_991 else { throw TransferError.invalid("Invalid recording timing field: \(key)") }
+            result[key] = value.int64Value
+        }
+        func n(_ key: String) -> Int64 { result[key] as! Int64 }
+        guard n("sourceFirstUs") >= 0, n("sourceLastUs") > n("sourceFirstUs"),
+              n("requestedHostUs") >= 0, n("requestedSourceUs") >= 0,
+              n("endpointErrorUs") == n("sourceLastUs") - n("requestedSourceUs"),
+              (-100_000...0).contains(n("endpointErrorUs")), (2...10000).contains(n("frames")),
+              (30...180).contains(n("retentionSeconds")), (5...30).contains(n("reviewSeconds")),
+              n("reviewSeconds") <= n("retentionSeconds") - 10,
+              n("sourceLastUs") - n("sourceFirstUs") >= n("reviewSeconds") * 1_000_000 - 100_000,
+              n("sourceLastUs") - n("sourceFirstUs") <= (n("reviewSeconds") + 5) * 1_000_000 else {
+            throw TransferError.invalid("Unavailable/partial review window or inconsistent recording metadata")
+        }
+        return result
+    }
     private var history: [[String: Any]] = []
     private(set) var state: [String: Any] = ["state": "idle", "bytes": 0, "totalBytes": 0, "checksumVerified": false]
     var onSend: ((String, [String: Any]) -> Void)?
@@ -32,8 +61,10 @@ final class SampleTransfer {
     var onFailure: ((String) -> Void)?
     var active: Bool { ["offer", "sending", "receiving", "finishing"].contains(phase) }
 
-    init(queue: DispatchQueue, directory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("cricket-transfer-" + UUID().uuidString)) {
-        self.queue = queue; self.directory = directory
+    init(queue: DispatchQueue, directory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("cricket-transfer-" + UUID().uuidString), availableBytes: @escaping (URL) throws -> Int = { try $0.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity ?? 0 }) {
+        self.queue = queue; self.directory = directory; self.availableBytes = availableBytes
+        // No recovery of killed transfers: stale partial/ready files never restore a ready state.
+        try? FileManager.default.removeItem(at: directory)
     }
     static func checksum(_ url: URL) throws -> String {
         let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
@@ -43,14 +74,19 @@ final class SampleTransfer {
     }
     private func update(_ phase: String, _ detail: String) {
         self.phase = phase
-        state = ["state": phase, "detail": detail, "requestId": id, "bytes": offset, "totalBytes": total,
+        let description = media == "recording" ? detail.replacingOccurrences(of: "sample", with: "recording clip") : detail
+        state = ["state": phase, "detail": description, "requestId": id, "bytes": offset, "totalBytes": total,
                  "sha256": checksum, "checksumVerified": phase == "ready" || phase == "complete", "attempts": history]
+        state["media"] = media
+        if let recording { state["recording"] = recording; state["reviewId"] = reviewID }
         if phase == "ready" || phase == "complete" {
             let seconds = max(ProcessInfo.processInfo.systemUptime - started, 0.000001)
             state["durationSeconds"] = seconds; state["throughputMBps"] = Double(total) / seconds / 1_000_000
             var result = state; result.removeValue(forKey: "attempts")
-            history.append(result); history = Array(history.suffix(10)); state["attempts"] = history
+            history.append(result); history = Array(history.suffix(10)); state["attempts"] = history.filter { $0["media"] as? String == media }
         }
+        state["media"] = media
+        if let recording { state["recording"] = recording; state["reviewId"] = reviewID }
         onChange?(state)
     }
     private func arm() {
@@ -85,7 +121,7 @@ final class SampleTransfer {
         guard !active else { throw TransferError.invalid("Stop the transfer before cleaning files") }
         clearPartial()
         if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
-        completed = nil; history = []; id = ""; offset = 0; total = 0; checksum = ""
+        completed = nil; recording = nil; media = "sample"; reviewID = ""; history = []; id = ""; offset = 0; total = 0; checksum = ""
         update("idle", "Temporary received files removed")
     }
     private func prepare() throws {
@@ -95,14 +131,20 @@ final class SampleTransfer {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         offset = 0; digest = SHA256(); started = ProcessInfo.processInfo.systemUptime
     }
-    func begin(_ url: URL, slow: Bool = false) throws {
+    func begin(_ url: URL, slow: Bool = false, recording info: [String: Any]? = nil, reviewId: String = "") throws {
+        guard !active else { throw TransferError.invalid("A transfer is already active") }
+        let metadata = try info.map { try Self.recordingMetadata($0) }
+        if metadata != nil, UUID(uuidString: reviewId) == nil { throw TransferError.invalid("Invalid review ID") }
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         guard size > 0, size <= Self.maxBytes else { throw TransferError.invalid("Sample must be 1–32 MiB") }
         let hash = try Self.checksum(url)
         try prepare(); id = UUID().uuidString.lowercased(); total = size; checksum = hash; sending = true; self.slow = slow
+        recording = metadata; media = metadata == nil ? "sample" : "recording"; reviewID = reviewId
         handle = try FileHandle(forReadingFrom: url)
         update("offer", "Waiting for host to accept sample")
-        send(["kind": "offer", "bytes": total, "sha256": checksum])
+        var offer: [String: Any] = ["kind": "offer", "bytes": total, "sha256": checksum, "media": media]
+        if let recording { offer["recording"] = recording; offer["reviewId"] = reviewID }
+        send(offer)
     }
     private func fail(_ message: String) { clearPartial(); update("failed", message); onFailure?(message) }
     func receive(id incomingID: String, packet: [String: Any], isHost: Bool) {
@@ -112,10 +154,22 @@ final class SampleTransfer {
                 guard isHost, let bytes = packet["bytes"] as? Int, (1...Self.maxBytes).contains(bytes),
                       let hash = packet["sha256"] as? String, hash.count == 64,
                       hash.allSatisfy({ "0123456789abcdef".contains($0) }) else { throw TransferError.invalid("Invalid sample offer") }
-                try prepare(); id = incomingID; total = bytes; checksum = hash; sending = false; slow = false
-                let path = directory.appendingPathComponent(id + ".part")
+                let offeredMedia = packet["media"] as? String ?? "sample"
+                guard ["sample", "recording"].contains(offeredMedia) else { throw TransferError.invalid("Unknown media kind") }
+                let offeredID = packet["reviewId"] as? String ?? ""
+                let metadata: [String: Any]?
+                if offeredMedia == "recording" {
+                    guard UUID(uuidString: offeredID) != nil, let input = packet["recording"] as? [String: Any], validateRecording != nil else { throw TransferError.invalid("Recording validation unavailable") }
+                    metadata = try Self.recordingMetadata(input)
+                } else { metadata = nil }
+                try acceptOffer?(offeredMedia, offeredID)
+                try prepare(); recording = metadata; media = offeredMedia; reviewID = offeredID; id = incomingID; total = bytes; checksum = hash; sending = false; slow = false
+                let path = directory.appendingPathComponent(id + ".part.mp4")
                 guard FileManager.default.createFile(atPath: path.path, contents: nil) else { throw TransferError.invalid("Cannot create partial file") }
-                partial = path; handle = try FileHandle(forWritingTo: path)
+                partial = path
+                let free = try availableBytes(directory)
+                guard free >= total + 64 * 1024 * 1024 else { throw TransferError.invalid("Low storage; review transfer unavailable") }
+                handle = try FileHandle(forWritingTo: path)
                 update("receiving", "Receiving encrypted sample")
                 send(["kind": "ack", "offset": 0]); return
             }
@@ -145,6 +199,7 @@ final class SampleTransfer {
                 let actual = digest.finalize().map { String(format: "%02x", $0) }.joined()
                 guard actual == checksum else { throw TransferError.invalid("Checksum mismatch; partial sample discarded") }
                 try handle?.synchronize(); try handle?.close(); handle = nil
+                if let recording { try validateRecording?(partial, recording) }
                 let ready = directory.appendingPathComponent(id + ".mp4")
                 try FileManager.default.moveItem(at: partial, to: ready); self.partial = nil; completed = ready
                 timer?.cancel(); timer = nil; update("ready", "Complete sample verified; ready to play")

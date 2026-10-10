@@ -34,10 +34,11 @@ class FeasibilityPlugin : Plugin() {
     private val recordingPreview by lazy { RecordingPreview(activity, bridge.webView) }
     @PluginMethod fun setRecordingPreview(call: PluginCall) { activity.runOnUiThread { recordingPreview.layout(call) } }
     private var inspectingFrame = false
+    private var preparingRemoteReview = false
     private val frameWorker = java.util.concurrent.Executors.newSingleThreadExecutor()
     @PluginMethod fun inspectRecordingFrame(call: PluginCall) { activity.runOnUiThread {
         val index = call.getInt("index")
-        if (inspectingFrame || player != null || index == null || index !in 0..9999) { call.reject("Close playback and choose an available frame"); return@runOnUiThread }
+        if (inspectingFrame || preparingRemoteReview || player != null || index == null || index !in 0..9999) { call.reject("Close playback and choose an available frame"); return@runOnUiThread }
         inspectingFrame = true
         recording.completedClip { file -> frameWorker.execute {
             try {
@@ -46,14 +47,51 @@ class FeasibilityPlugin : Plugin() {
             } catch (error: Exception) { activity.runOnUiThread { inspectingFrame = false; call.reject(error.message ?: "Frame decode failed") } }
         } }
     } }
+    @PluginMethod fun inspectReceivedReviewFrame(call: PluginCall) { activity.runOnUiThread {
+        val index = call.getInt("index")
+        if (inspectingFrame || preparingRemoteReview || player != null || index == null || index !in 0..9999) { call.reject("Close playback and choose an available frame"); return@runOnUiThread }
+        inspectingFrame = true
+        session.acquireReview { file, info -> frameWorker.execute {
+            try {
+                val result = RecordingFrame.inspect(file ?: error("No verified host recording review"), index)
+                result.put("sourceTimestampUs", checkNotNull(info).getLong("sourceFirstUs") + result.getLong("timestampUs"))
+                activity.runOnUiThread { inspectingFrame = false; call.resolve(JSObject(result.toString())) }
+            } catch (error: Exception) { activity.runOnUiThread { inspectingFrame = false; call.reject(error.message ?: "Frame decode failed") } }
+            finally { if (file != null) session.releaseMedia() }
+        } }
+    } }
+    @PluginMethod fun playReceivedReview(call: PluginCall) { activity.runOnUiThread {
+        val rate = (call.getDouble("rate", 1.0) ?: 1.0).toFloat()
+        if (rate !in listOf(1f, 0.5f, 0.25f) || player != null || inspectingFrame || activity.isFinishing || activity.isDestroyed) { call.reject("Close playback/inspection and foreground the app first"); return@runOnUiThread }
+        session.acquireReview { file, _ -> activity.runOnUiThread {
+            if (file == null) { call.reject("No complete, verified host recording review"); return@runOnUiThread }
+            if (player != null || activity.isFinishing || activity.isDestroyed) { session.releaseMedia(); call.reject("Close playback first"); return@runOnUiThread }
+            try {
+                player = SamplePlayer(activity, file, { error ->
+                    if (error == null) { session.reviewPlaybackStarted(); call.resolve() } else call.reject(error)
+                }, { player = null; session.releaseMedia() }, rate)
+            } catch (error: Exception) { player = null; session.releaseMedia(); call.reject(error.message ?: "Cannot open host review playback") }
+        } }
+    } }
     private var cameraRecording = false // UI thread owns scanner/generator/camera resource exclusion.
     private val recording by lazy { RollingRecording(context) {
         activity.runOnUiThread { cameraRecording = false; recordingPreview.hide(); activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     } }
     override fun load() {
+        session.onReviewCancelled = { activity.runOnUiThread { preparingRemoteReview = false } }
+        session.exportReview = { done -> recording.exportReview { file, info, error ->
+            activity.runOnUiThread { preparingRemoteReview = false }; done(file, info, error)
+        } }
+        session.validateReceivedReview = RecordingFrame::validateReview
         session.onReview = { endpoint, done -> activity.runOnUiThread {
             if (player != null || inspectingFrame) done(IllegalStateException("Close frame inspection/playback before a remote review"))
-            else recording.extract(endpoint, done)
+            else {
+                preparingRemoteReview = true
+                recording.extract(endpoint) { error ->
+                    if (error != null) activity.runOnUiThread { preparingRemoteReview = false }
+                    done(error)
+                }
+            }
         } }
     }
     @PluginMethod fun measureReviewClock(call: PluginCall) { session.measureClock(); call.resolve() }
@@ -63,7 +101,7 @@ class FeasibilityPlugin : Plugin() {
     @PluginMethod fun recordingStatus(call: PluginCall) { recording.status { call.resolve(JSObject(it.toString())) } }
     @PluginMethod fun recordingReport(call: PluginCall) { recording.report { call.resolve(JSObject().put("report", it)) } }
     @PluginMethod fun startRecording(call: PluginCall) { activity.runOnUiThread {
-        if (cameraRecording || scanning || player != null || generating || inspectingFrame) { call.reject("Stop capture, close scanning/playback and finish sample generation first"); return@runOnUiThread }
+        if (cameraRecording || scanning || player != null || generating || inspectingFrame || preparingRemoteReview) { call.reject("Stop capture, close scanning/playback and finish sample generation first"); return@runOnUiThread }
         if (getPermissionState("camera") != PermissionState.GRANTED) {
             call.reject("Camera access denied or not requested. Request camera permission, or enable Camera in app settings."); return@runOnUiThread
         }
@@ -87,7 +125,7 @@ class FeasibilityPlugin : Plugin() {
         activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); call.resolve()
     } } }
     @PluginMethod fun extractRecording(call: PluginCall) { activity.runOnUiThread {
-        if (player != null || inspectingFrame) { call.reject("Close frame inspection/playback before replacing the clip"); return@runOnUiThread }
+        if (player != null || inspectingFrame || preparingRemoteReview) { call.reject("Close frame inspection/playback before replacing the clip"); return@runOnUiThread }
         recording.extract { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Cannot extract recent clip") }
     } }
     @PluginMethod fun playRecordingClip(call: PluginCall) {
@@ -101,10 +139,10 @@ class FeasibilityPlugin : Plugin() {
         } }
     }
     @PluginMethod fun cleanupRecording(call: PluginCall) { activity.runOnUiThread {
-        if (player != null || inspectingFrame) { call.reject("Close frame inspection/playback before cleanup"); return@runOnUiThread }
+        if (player != null || inspectingFrame || preparingRemoteReview) { call.reject("Close frame inspection/playback before cleanup"); return@runOnUiThread }
         recording.cleanup { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Cannot clean recording") }
     } }
-    private val session by lazy { LocalSession(::localAddresses, ::bindWiFi, java.io.File(context.cacheDir, "cricket-transfer-${java.util.UUID.randomUUID()}")) }
+    private val session by lazy { LocalSession(::localAddresses, ::bindWiFi, java.io.File(context.cacheDir, "cricket-transfer")) }
     private var scanning = false
     private fun localAddresses(): List<String> = NetworkInterface.getNetworkInterfaces().toList()
         .filter { it.isUp && !it.isLoopback && (it.name.startsWith("wlan") || it.name.startsWith("ap") || it.name.startsWith("swlan") || it.name.startsWith("wifi")) }
@@ -220,12 +258,12 @@ class FeasibilityPlugin : Plugin() {
         }
     } }
     @PluginMethod fun playReceivedSample(call: PluginCall) {
-        session.completedSample { file -> activity.runOnUiThread {
+        session.acquireSample { file -> activity.runOnUiThread {
             if (file == null) { call.reject("No complete, checksum-verified sample"); return@runOnUiThread }
-            if (player != null || activity.isFinishing || activity.isDestroyed) { call.reject("Close playback and return to the app first"); return@runOnUiThread }
+            if (player != null || inspectingFrame || activity.isFinishing || activity.isDestroyed) { session.releaseMedia(); call.reject("Close playback/inspection and return to the app first"); return@runOnUiThread }
             try {
-                player = SamplePlayer(activity, file, { error -> if (error == null) call.resolve() else call.reject(error) }, { player = null })
-            } catch (_: Exception) { player = null; call.reject("Cannot open native playback") }
+                player = SamplePlayer(activity, file, { error -> if (error == null) call.resolve() else call.reject(error) }, { player = null; session.releaseMedia() })
+            } catch (_: Exception) { player = null; session.releaseMedia(); call.reject("Cannot open native playback") }
         } }
     }
     @PluginMethod fun cleanupSamples(call: PluginCall) { activity.runOnUiThread {

@@ -65,6 +65,37 @@ class TransferTest {
             receiver.cleanup(); assertFalse(directory.exists())
         }.get() } finally { queue.shutdownNow(); directory.deleteRecursively() }
     }
+    @Test fun reviewMetadataStorageAndRestartGates() {
+        val queue = Executors.newSingleThreadScheduledExecutor()
+        val directory = File(context.cacheDir, "review-gates-${UUID.randomUUID()}")
+        try { queue.submit {
+            val info = JSONObject().put("sourceFirstUs", 1_000_000).put("sourceLastUs", 20_966_667).put("requestedHostUs", 21_000_000)
+                .put("requestedSourceUs", 21_000_000).put("endpointErrorUs", -33_333).put("frames", 600).put("retentionSeconds", 120).put("reviewSeconds", 20)
+            assertEquals(20_966_667L, SampleTransfer.recordingMetadata(info).getLong("sourceLastUs"))
+            for ((key, value) in listOf("endpointErrorUs" to -500_000, "frames" to 0, "reviewSeconds" to 31, "sourceLastUs" to 2_000_000, "requestedSourceUs" to 21_000_000.5)) {
+                try { SampleTransfer.recordingMetadata(JSONObject(info.toString()).put(key, value)); fail("Invalid field accepted: $key") } catch (_: Exception) {}
+            }
+            val low = SampleTransfer(queue, directory) { 0 }
+            low.receive(UUID.randomUUID().toString(), JSONObject().put("kind", "offer").put("bytes", 3).put("sha256", "0".repeat(64)), true)
+            assertEquals("failed", low.state.getString("state")); assertNull(low.completed); assertTrue(directory.listFiles()!!.isEmpty())
+            low.cleanup()
+            directory.mkdirs(); File(directory, "stale.part").writeBytes(byteArrayOf(1))
+            val fresh = SampleTransfer(queue, directory)
+            assertNull(fresh.completed); assertEquals("idle", fresh.state.getString("state")); assertFalse(directory.exists())
+            val rejecting = SampleTransfer(queue, directory).apply {
+                validateRecording = { _, _ -> error("Decoder rejected recording") }
+                acceptOffer = { media, id -> check(media == "recording" && SessionAuthentication.validID(id)) }
+            }
+            val id = UUID.randomUUID().toString(); val bytes = byteArrayOf(1, 2, 3)
+            val hash = SampleTransfer.hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes))
+            rejecting.receive(id, JSONObject().put("kind", "offer").put("bytes", 3).put("sha256", hash).put("media", "recording").put("reviewId", UUID.randomUUID().toString()).put("recording", info), true)
+            rejecting.receive(id, JSONObject().put("kind", "chunk").put("offset", 0).put("data", "AQID"), true)
+            assertNull(rejecting.completed); assertFalse(rejecting.state.getBoolean("checksumVerified"))
+            rejecting.receive(id, JSONObject().put("kind", "end"), true)
+            assertEquals("failed", rejecting.state.getString("state")); assertNull(rejecting.completed); assertFalse(rejecting.state.getBoolean("checksumVerified")); assertTrue(directory.listFiles()!!.isEmpty())
+            rejecting.cleanup()
+        }.get() } finally { queue.shutdownNow(); directory.deleteRecursively() }
+    }
     @Test fun generatedSampleEncodesAndDecodesOnThisPhone() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             // Temporary window flag only; closes with the test Activity, no system-setting change.

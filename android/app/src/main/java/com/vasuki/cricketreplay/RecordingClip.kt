@@ -51,6 +51,7 @@ internal object RecordingClip {
                             }
                             check(last < 0 || pts > last) { "Non-monotonic clip timestamps" }
                             val delta = if (last < 0) 0 else pts - last
+                            check(delta <= 100_000) { "Partial footage: recorded frame interval exceeds 100 ms" }
                             maxDelta = maxOf(maxDelta, delta); if (delta > 50_000) gaps++
                             val info = MediaCodec.BufferInfo().apply { set(0, size, pts - base,
                                 if (extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0) }
