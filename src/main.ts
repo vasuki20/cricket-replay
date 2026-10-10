@@ -1,7 +1,7 @@
 import { Component, OnDestroy, signal } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { Capacitor } from '@capacitor/core';
-import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus } from './native';
+import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus, RecordedFrame } from './native';
 
 @Component({
   selector: 'replay-app', standalone: true,
@@ -81,6 +81,19 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus 
         @else { <p>Join Wi-Fi manually. Android camera connections use the Wi-Fi network; QR scanning requires camera permission.</p> }
         <p>Status messages are authenticated; sample video packets are encrypted. Backgrounding stops the session; restart after returning.</p>
       </section>
+      <section><h2>Review timing experiment</h2>
+        <p>Pair first, then start recording on the Camera phone. Clock measurement uses eight authenticated exchanges. Review stays anchored to the native tap timestamp, even with delivery delay.</p>
+        <button [disabled]="!session()?.authenticated" (click)="timingAction('measure')">Measure phone clocks</button>
+        @if (session()?.clock; as c) { <p>{{ c.samples }} samples · peer minus this phone {{ (c.offsetUs / 1000).toFixed(2) }} ms · network uncertainty ±{{ (c.uncertaintyUs / 1000).toFixed(2) }} ms</p> }
+        @if (role() === 'host') {
+          <label>Injected request delay<select [value]="reviewDelayMs()" (change)="reviewDelayMs.set(+$any($event.target).value)"><option value="0">None</option><option value="2000">2 seconds</option><option value="5000">5 seconds</option></select></label>
+          <button [disabled]="!session()?.authenticated || (session()?.clock?.samples ?? 0) < 4" (click)="timingAction('review')">Request review at this tap</button>
+          <p>The clip is extracted and inspected on the Camera phone. Camera-clip transfer is the next integration experiment.</p>
+        }
+        @if (session()?.review; as r) { <p>{{ r.detail ?? r.state }} · tap {{ r.peerTapUs }} µs · injected delay {{ r.injectedDelayMs ?? 0 }} ms</p> }
+        @if (timingError()) { <p class="error" role="alert">{{ timingError() }}</p> }
+        <p>Measure again after reconnect or after 30 seconds. Network uncertainty excludes sensor exposure/clock drift and bridge scheduling; this is not frame-perfect synchronization.</p>
+      </section>
       <section><h2>Sample video transfer</h2>
         @if (!transferSupported) { <p>Video transfer requires the installed Android or iPhone app.</p> } @else {
         <p>Generate a synthetic 20-second MP4 on the camera phone, send it, then play the verified file on the host.</p>
@@ -120,7 +133,16 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus 
         <button [disabled]="recordingActive() || recordingBusy() || networkBusy() || transferBusy()" (click)="recordingAction('start')">Start rear camera</button>
         <button [disabled]="!recordingActive() && !recordingStarting()" (click)="recordingAction('stop')">Stop recording</button>
         <button [disabled]="recording()?.state !== 'recording' || recordingBusy() || (recording()?.elapsedSeconds ?? 0) < reviewSeconds()" (click)="recordingAction('extract')">Extract latest review clip</button>
-        <button [disabled]="!recording()?.extraction?.ready || recordingBusy()" (click)="recordingAction('play')">Play recording clip</button>
+        <label>Clip playback speed<select [value]="playbackRate()" (change)="playbackRate.set(+$any($event.target).value)"><option value="1">1×</option><option value="0.5">0.5×</option><option value="0.25">0.25×</option></select></label>
+        <button [disabled]="!recording()?.extraction?.ready || recordingBusy() || frameBusy()" (click)="recordingAction('play')">Play recording clip</button>
+        <p>Recorded-frame inspection (close playback first)</p>
+        <button [disabled]="!recording()?.extraction?.ready || frameBusy()" (click)="inspectFrame(0)">Inspect first frame</button>
+        <button [disabled]="!frame() || frameBusy()" (click)="inspectFrame(frame()!.frameCount - 1)">Last frame</button>
+        <button [disabled]="!frame() || frameBusy() || frame()!.index === 0" (click)="inspectFrame(frame()!.index - 1)">Previous frame</button>
+        <button [disabled]="!frame() || frameBusy() || frame()!.index + 1 >= frame()!.frameCount" (click)="inspectFrame(frame()!.index + 1)">Next frame</button>
+        @if (frameBusy()) { <p>Decoding recorded frame…</p> }
+        @if (frame(); as f) { <figure><img style="max-width:100%" [src]="'data:image/png;base64,' + f.pngBase64" alt="Decoded frame from this recording clip"><figcaption>Frame {{ f.index + 1 }} / {{ f.frameCount }} · recorded PTS {{ (f.timestampUs / 1000).toFixed(3) }} ms</figcaption></figure> }
+        @if (frameError()) { <p class="error" role="alert">{{ frameError() }}</p> }
         <button [disabled]="recordingActive() || recordingBusy()" (click)="recordingAction('cleanup')">Delete recording experiment</button>
         <button (click)="readRecordingReport()">Read full experiment report</button>
         @if (fullRecordingReport()) { <label>Metadata report — select and copy to preserve results<textarea readonly rows="12" [value]="fullRecordingReport()" (focus)="$any($event.target).select()"></textarea></label> }
@@ -139,6 +161,7 @@ import { Diagnostics, Feasibility, SessionStatus, SampleStatus, RecordingStatus 
           <p [class.error]="r.extraction.state === 'failed'">Extraction: {{ r.extraction.state }} · {{ r.extraction.detail }}</p>
           @if (r.extraction.ready) { <p>{{ r.extraction.durationSeconds?.toFixed(2) }} s · {{ r.extraction.segments }} segments · {{ r.extraction.effectiveFps?.toFixed(2) }} fps · keyframe lead-in {{ r.extraction.leadInSeconds?.toFixed(2) }} s · {{ r.extraction.decodedFrames }} decoded smoke-check frames</p> }
           </div>
+          @if (r.extraction.endpointErrorUs !== undefined) { <p>Actual final frame minus mapped tap: {{ (r.extraction.endpointErrorUs! / 1000).toFixed(3) }} ms</p> }
           <details><summary>Recording diagnostics (no footage or paths)</summary><pre>{{ recordingReport() }}</pre></details>
         }
         <p>Timestamp intervals above 50 ms flag investigation; they do not prove a visible gap. Inspect a moving subject or timer across clip boundaries. Backgrounding stops capture. Clips stay on this phone.</p>
@@ -157,6 +180,26 @@ class App implements OnDestroy {
   readonly transferSupported = this.networkSupported;
   readonly recordingSupported = this.networkSupported;
   readonly recording = signal<RecordingStatus | null>(null);
+  readonly playbackRate = signal(1);
+  readonly reviewDelayMs = signal(0);
+  readonly timingError = signal('');
+  readonly frame = signal<RecordedFrame | null>(null);
+  readonly frameBusy = signal(false);
+  readonly frameError = signal('');
+  async timingAction(action: 'measure' | 'review') {
+    this.timingError.set('');
+    try {
+      if (action === 'measure') await Feasibility.measureReviewClock();
+      else await Feasibility.requestTimedReview({ delayMs: this.reviewDelayMs() });
+    } catch (error) { this.timingError.set(error instanceof Error ? error.message : String(error)); }
+  }
+  async inspectFrame(index: number) {
+    if (this.frameBusy()) return;
+    this.frameBusy.set(true); this.frameError.set('');
+    try { this.frame.set(await Feasibility.inspectRecordingFrame({ index })); }
+    catch (error) { this.frameError.set(error instanceof Error ? error.message : String(error)); }
+    finally { this.frameBusy.set(false); }
+  }
   readonly recordingBusy = signal(false);
   readonly recordingStarting = signal(false);
   readonly recordingError = signal('');
@@ -171,7 +214,8 @@ class App implements OnDestroy {
   recordingActive() { return ['starting', 'recording', 'stopping'].includes(this.recording()?.state ?? 'idle'); }
   recordingReport() { return JSON.stringify(this.recording(), null, 2); }
   async recordingAction(action: 'start' | 'stop' | 'extract' | 'play' | 'cleanup') {
-    if (this.recordingBusy() && action !== 'stop') return;
+    if ((this.recordingBusy() || this.frameBusy()) && action !== 'stop') return;
+    if (['start', 'extract', 'cleanup'].includes(action)) this.frame.set(null);
     if (action !== 'stop') this.recordingBusy.set(true);
     this.recordingError.set('');
     const attempt = action === 'start' || action === 'stop' ? ++this.recordingStartAttempt : this.recordingStartAttempt;
@@ -191,7 +235,7 @@ class App implements OnDestroy {
         await Feasibility.startRecording({ retentionSeconds, reviewSeconds });
       } else if (action === 'stop') await Feasibility.stopRecording();
       else if (action === 'extract') await Feasibility.extractRecording();
-      else if (action === 'play') await Feasibility.playRecordingClip();
+      else if (action === 'play') await Feasibility.playRecordingClip({ rate: this.playbackRate() });
       else await Feasibility.cleanupRecording();
       this.recording.set(await Feasibility.recordingStatus());
     } catch (error) { this.recordingError.set(error instanceof Error ? error.message : String(error)); }
@@ -251,7 +295,11 @@ class App implements OnDestroy {
     catch (error) { this.networkError.set(error instanceof Error ? error.message : String(error)); }
     finally {
       if (this.recordingSupported) {
-        try { this.recording.set(await Feasibility.recordingStatus()); await this.updateRecordingPreview(); }
+        try {
+          const next = await Feasibility.recordingStatus();
+          if (next.extraction.sourceLastUs !== this.recording()?.extraction.sourceLastUs) this.frame.set(null);
+          this.recording.set(next); await this.updateRecordingPreview();
+        }
         catch (error) { this.recordingError.set(error instanceof Error ? error.message : String(error)); }
       }
       this.polling = false;

@@ -25,4 +25,6 @@ Android host/camera QR pairing and authenticated diagnostics pass by user report
 
 The [Android](docs/feasibility/android-recording.md) and [iPhone](docs/feasibility/ios-recording.md) continuous camera experiments add rear-camera capture, configurable retention/review windows and local extraction while encoding continues. Physical 30-minute recording and camera boundary continuity remain unverified; see each experiment's evidence and manual test instructions.
 
+The [review timing and recorded-frame experiment](docs/feasibility/review-timing.md) adds native clock mapping, delayed review requests, actual-frame inspection and slow playback on both platforms. Automated development checks pass; physical timing/playback measurements remain pending. Requested recording clips stay on the camera pending #14 integration.
+
 The iPhone P0-03 connection experiment and two-phone test procedure are in [connectivity.md](docs/feasibility/connectivity.md). Shared-Wi-Fi QR pairing and peer ping passed by user report. The iPhone [generated-video transfer experiment](docs/feasibility/transfer.md) adds encrypted MP4 transfer, checksum verification, progress, and native playback; mixed-phone tests pass by user report; iPhone-to-iPhone transfer and detailed timings remain pending.

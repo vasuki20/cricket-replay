@@ -62,7 +62,7 @@ struct ConnectivityTests {
         require(!newCamera.verify(proof), "reject proof replay on new connection")
         require(!hostAuth.verify(proof), "reject reflection")
 
-        let host = LocalSession(), camera = LocalSession()
+        let host = LocalSession(), camera = LocalSession(now: { LocalSession.nowUs() + 5_000_000 })
         let port = UInt16.random(in: 20000...40000)
         let started = DispatchSemaphore(value: 0)
         host.startHost(secret: secret, port: port) { error in
@@ -76,6 +76,23 @@ struct ConnectivityTests {
         camera.ping(status: true) { require($0, "camera status sent") }
         wait("bidirectional replies") { snapshot(host)["repliesReceived"] as? Int == 1 && snapshot(camera)["repliesReceived"] as? Int == 1 }
         require(snapshot(host)["lastRoundTripMs"] as? Double != nil, "round trip measured")
+        var reviewEndpoint: Int64 = 0
+        var arrival: Double = 0
+        camera.onReview = { endpoint, done in reviewEndpoint = endpoint; arrival = LocalSession.nowUs() + 5_000_000; done(nil) }
+        host.measureClock()
+        wait("eight clock exchanges", seconds: 10) { (snapshot(host)["clock"] as? [String: Any])?["samples"] as? Int == 8 }
+        let clock = snapshot(host)["clock"] as! [String: Any]
+        let offset = clock["offsetUs"] as! Double, uncertainty = clock["uncertaintyUs"] as! Double
+        require(abs(offset - 5_000_000) <= uncertainty + 50, "known clock offset inside measured uncertainty")
+        for delay in [0, 2000] {
+            let queued = DispatchSemaphore(value: 0)
+            host.requestReview(delayMs: delay) { require($0 == nil, "timed review queued"); queued.signal() }
+            require(queued.wait(timeout: .now() + 2) == .success, "review callback")
+            let tap = (snapshot(host)["review"] as! [String: Any])["tapUs"] as! Double
+            wait("timed review reply", seconds: 10) { (snapshot(host)["review"] as? [String: Any])?["state"] as? String == "ready" }
+            require(abs(Double(reviewEndpoint) - (tap + offset)) <= 1, "endpoint anchored to tap, not delayed delivery")
+            require(arrival - Double(reviewEndpoint) >= Double(delay) * 1000 - uncertainty - 1000, "injected delivery delay observed")
+        }
         let source = FileManager.default.temporaryDirectory.appendingPathComponent("cricket-test-" + UUID().uuidString)
         let bytes = Data((0..<100_000).map { UInt8($0 % 251) })
         try! bytes.write(to: source)
@@ -108,8 +125,14 @@ struct ConnectivityTests {
         host.completedSample { require($0 == nil, "no playable partial URL"); partialDone.signal() }
         require(partialDone.wait(timeout: .now() + 2) == .success, "partial callback")
         wait("host allows reconnect") { snapshot(host)["state"] as? String == "listening" && snapshot(host)["authenticated"] as? Bool == false }
+        require(snapshot(host)["clock"] == nil, "disconnect invalidates clock mapping")
         camera.connect(address: "127.0.0.1", secret: secret, port: port)
-        wait("same-secret reconnect") { snapshot(camera)["authenticated"] as? Bool == true }
+        wait("same-secret reconnect") { snapshot(camera)["authenticated"] as? Bool == true && snapshot(host)["authenticated"] as? Bool == true }
+        let uncalibrated = DispatchSemaphore(value: 0)
+        host.requestReview(delayMs: 0) { require($0 != nil, "reconnect needs fresh calibration"); uncalibrated.signal() }
+        require(uncalibrated.wait(timeout: .now() + 2) == .success, "uncalibrated callback")
+        host.measureClock()
+        wait("reconnected clock calibration", seconds: 10) { (snapshot(host)["clock"] as? [String: Any])?["samples"] as? Int == 8 }
         sendSample()
         wait("retry completes") { transfer(host)["state"] as? String == "ready" && transfer(camera)["state"] as? String == "complete" }
         let cleaned = DispatchSemaphore(value: 0)

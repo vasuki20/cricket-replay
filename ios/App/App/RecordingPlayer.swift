@@ -6,7 +6,7 @@ final class RecordingPlayer: AVPlayerViewController {
     private var observation: NSKeyValueObservation?
     private var timeout: DispatchWorkItem?
     private var completion: ((String?) -> Void)?
-    init(url: URL, completion: @escaping (String?) -> Void) {
+    init(url: URL, rate: Float = 1, completion: @escaping (String?) -> Void) {
         self.completion = completion
         super.init(nibName: nil, bundle: nil)
         modalPresentationStyle = .fullScreen
@@ -14,7 +14,10 @@ final class RecordingPlayer: AVPlayerViewController {
         observation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if item.status == .readyToPlay { self.player?.play(); self.settle(nil) }
+                if item.status == .readyToPlay {
+                    guard rate == 1 || item.canPlaySlowForward else { self.settle("Decoder does not support slow playback"); self.dismiss(animated: true); return }
+                    self.player?.playImmediately(atRate: rate); self.settle(nil)
+                }
                 else if item.status == .failed { self.settle(item.error?.localizedDescription ?? "Recording playback failed"); self.dismiss(animated: true) }
             }
         }

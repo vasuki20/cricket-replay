@@ -2,6 +2,7 @@ import Foundation
 import Network
 import CryptoKit
 import Darwin
+import CoreMedia
 
 // Status frames are authenticated; transfer packets additionally use session-scoped AES-GCM.
 final class SessionAuthentication {
@@ -66,6 +67,8 @@ final class SessionAuthentication {
 }
 
 final class LocalSession {
+    private let clock: () -> Double
+    init(now: @escaping () -> Double = { LocalSession.nowUs() }) { clock = now }
     private let queue = DispatchQueue(label: "cricket.local-session")
     private var listener: NWListener?
     private var connection: NWConnection?
@@ -73,6 +76,9 @@ final class LocalSession {
     private var buffer = Data()
     private var timeout: DispatchWorkItem?
     private var pending: [String: (Double, DispatchWorkItem)] = [:]
+    private var clockSamples = 0
+    private var bestClock: (Double, Double, Double)? // peer minus local, half network RTT, local measurement time
+    var onReview: ((Int64, @escaping (Error?) -> Void) -> Void)?
     private var authenticated = false
     private var role = "host"
     private var secret = ""
@@ -183,8 +189,8 @@ final class LocalSession {
             if let error { self.failPeer(error.localizedDescription) }
         })
     }
-    private func signed(_ type: String, _ id: String = UUID().uuidString.lowercased()) {
-        if let frame = authentication?.signed(type: type, id: id) { send(frame) }
+    private func signed(_ type: String, _ id: String = UUID().uuidString.lowercased(), payload: String = "") {
+        if let frame = authentication?.signed(type: type, id: id, payload: payload) { send(frame) }
     }
     private func receive(_ conn: NWConnection) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self, weak conn] data, _, complete, error in
@@ -233,12 +239,44 @@ final class LocalSession {
             } catch { failPeer(error.localizedDescription) }
         case "ping", "status":
             snapshot["pingsReceived"] = (snapshot["pingsReceived"] as? Int ?? 0) + 1
-            signed(type == "ping" ? "pong" : "statusReply", id)
+            let receivedUs = self.clock()
+            let data = (frame["payload"] as? String ?? "").data(using: .utf8) ?? Data()
+            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if type == "status", body?["kind"] as? String == "review" {
+                guard role == "camera", let endpoint = body?["peerTapUs"] as? NSNumber, let onReview else { failPeer("Review receiver unavailable"); return }
+                let token = auth
+                onReview(endpoint.int64Value) { error in self.queue.async {
+                    guard self.authentication === token else { return }
+                    let reply: [String: Any] = ["kind": "review", "ok": error == nil, "detail": error?.localizedDescription ?? "Requested clip ready on camera", "peerTapUs": endpoint]
+                    self.signed("statusReply", id, payload: Self.json(reply))
+                } }
+            } else if type == "status", body?["kind"] as? String == "clock" {
+                signed("statusReply", id, payload: Self.json(["kind": "clock", "t2": receivedUs, "t3": self.clock()]))
+            } else { signed(type == "ping" ? "pong" : "statusReply", id) }
             publish("connected", "Received authenticated \(type); replied")
         case "pong", "statusReply":
             guard let request = pending.removeValue(forKey: id) else { failPeer("Unexpected response"); return }
             request.1.cancel()
-            snapshot["lastRoundTripMs"] = (ProcessInfo.processInfo.systemUptime - request.0) * 1000
+            let t4 = self.clock()
+            if let data = (frame["payload"] as? String)?.data(using: .utf8),
+               let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                if body["kind"] as? String == "clock", let t2 = body["t2"] as? NSNumber, let t3 = body["t3"] as? NSNumber {
+                    let t1 = request.0 * 1_000_000
+                    let network = t4 - t1 - (t3.doubleValue - t2.doubleValue)
+                    guard network >= 0, t3.doubleValue >= t2.doubleValue else { failPeer("Invalid clock exchange"); return }
+                    let offset = ((t2.doubleValue - t1) + (t3.doubleValue - t4)) / 2
+                    clockSamples += 1
+                    if bestClock == nil || network / 2 < bestClock!.1 { bestClock = (offset, network / 2, t4) }
+                    if let bestClock { snapshot["clock"] = ["samples": clockSamples, "offsetUs": bestClock.0, "uncertaintyUs": bestClock.1, "measuredAtUs": bestClock.2] }
+                } else if body["kind"] as? String == "review" {
+                    var review = snapshot["review"] as? [String: Any] ?? [:]
+                    for (key, value) in body { review[key] = value }
+                    review["state"] = body["ok"] as? Bool == true ? "ready" : "failed"
+                    review["replyElapsedMs"] = (t4 - request.0 * 1_000_000) / 1000
+                    snapshot["review"] = review
+                }
+            }
+            snapshot["lastRoundTripMs"] = (self.clock() / 1_000_000 - request.0) * 1000
             snapshot["repliesReceived"] = (snapshot["repliesReceived"] as? Int ?? 0) + 1
             publish("connected", "Received authenticated \(type)")
         default: failPeer("Unexpected handshake message")
@@ -253,12 +291,45 @@ final class LocalSession {
                 guard let self, self.generation == token, self.pending[id] != nil else { return }
                 self.failPeer("Peer response timed out; reconnect")
             }
-            self.pending[id] = (ProcessInfo.processInfo.systemUptime, timeout)
+            self.pending[id] = (self.clock() / 1_000_000, timeout)
             self.queue.asyncAfter(deadline: .now() + 8, execute: timeout)
-            self.signed(status ? "status" : "ping", id); completion(true)
+            self.signed(status ? "status" : "ping", id, payload: status ? Self.json(["kind": "clock"]) : ""); completion(true)
+        }
+    }
+    static func nowUs() -> Double { CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())) * 1_000_000 }
+    private static func json(_ value: [String: Any]) -> String { String(data: (try? JSONSerialization.data(withJSONObject: value)) ?? Data(), encoding: .utf8) ?? "" }
+    func measureClock() { queue.async {
+        self.clockSamples = 0; self.bestClock = nil; self.snapshot.removeValue(forKey: "clock")
+        let token = self.authentication
+        for index in 0..<8 { self.queue.asyncAfter(deadline: .now() + Double(index) * 0.4) {
+            guard self.authenticated, self.authentication === token else { return }
+            self.ping(status: true) { _ in }
+        } }
+    } }
+    func requestReview(delayMs: Int, done: @escaping (Error?) -> Void) {
+        let tap = self.clock()
+        queue.async {
+            guard self.role == "host", self.authenticated, self.clockSamples >= 4, let best = self.bestClock,
+                  tap - best.2 < 30_000_000, (0...5000).contains(delayMs), self.pending.isEmpty else {
+                done(TransferError.invalid("Measure clocks first; wait for replies, then review within 30 seconds")); return
+            }
+            let id = UUID().uuidString.lowercased(); let token = self.authentication
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, self.authentication === token, self.pending[id] != nil else { return }
+                self.failPeer("Timed review expired; reconnect")
+            }
+            self.pending[id] = (tap / 1_000_000, timeout)
+            self.queue.asyncAfter(deadline: .now() + 45, execute: timeout)
+            self.snapshot["review"] = ["kind": "review", "state": "requesting", "tapUs": tap, "peerTapUs": tap + best.0, "uncertaintyUs": best.1, "injectedDelayMs": delayMs]
+            self.queue.asyncAfter(deadline: .now() + Double(delayMs) / 1000) {
+                guard self.authentication === token, self.authenticated else { return }
+                self.signed("status", id, payload: Self.json(["kind": "review", "peerTapUs": Int64((tap + best.0).rounded())]))
+            }
+            done(nil)
         }
     }
     private func failPeer(_ detail: String) {
+        bestClock = nil; clockSamples = 0; snapshot.removeValue(forKey: "clock"); snapshot.removeValue(forKey: "review")
         transfer.cancel(detail)
         timeout?.cancel(); timeout = nil
         connection?.stateUpdateHandler = nil; connection?.cancel(); connection = nil

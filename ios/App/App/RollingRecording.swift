@@ -14,6 +14,7 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private var buffer = RecordingBuffer(config: try! RecordingConfig())
     private var capture: AVCaptureSession?
     private var encoderEpoch = 0
+    private var extractionTiming: [String: Any] = [:]
     #if os(iOS)
     private var previewLayer: AVCaptureVideoPreviewLayer?
     #endif
@@ -321,11 +322,26 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             if run == current && active.finalizing { writer.cancelWriting(); fail(RecordingError.invalid("Segment finalization exceeded ten seconds")) }
         }
     }
-    func extract(_ done: @escaping (Error?) -> Void) { queue.async {
+    func extract(endpointHostUs: Int64? = nil, _ done: @escaping (Error?) -> Void) { queue.async {
         guard self.state == "recording", !self.extracting else { done(RecordingError.invalid("Record first; only one extraction may run")); return }
         guard self.lastPts - self.firstPts >= Int64(self.config.reviewSeconds) * 1_000_000 else { done(RecordingError.invalid("Wait for the configured review duration")); return }
-        self.pendingEnd = self.lastPts; self.forceSync = true; self.extractDone = done; self.extracting = true
+        var target = self.lastPts
+        self.extractionTiming = [:]
+        if let endpointHostUs {
+            let sessionClock: CMClock?
+            if #available(iOS 15.4, macOS 12.3, *) { sessionClock = self.capture?.synchronizationClock }
+            else { sessionClock = self.capture?.masterClock }
+            guard let clock = sessionClock else { done(RecordingError.invalid("Capture clock unavailable")); return }
+            let converted = CMSyncConvertTime(CMTime(value: endpointHostUs, timescale: 1_000_000), from: CMClockGetHostTimeClock(), to: clock)
+            guard converted.isNumeric else { done(RecordingError.invalid("Capture clock mapping unavailable")); return }
+            target = RecordingMedia.microseconds(converted)
+            self.extractionTiming = ["requestedHostUs": endpointHostUs, "requestedSourceUs": target]
+        }
+        let endpoint = min(target, self.lastPts)
+        guard endpoint - self.firstPts >= Int64(self.config.reviewSeconds) * 1_000_000 else { done(RecordingError.invalid("Requested window is not available")); return }
+        self.pendingEnd = endpoint; self.forceSync = true; self.extractDone = done; self.extracting = true
         self.extraction = ["state": "sealing", "ready": false, "detail": "Waiting for next keyframe and file finalization; capture continues"]
+        do { try self.launchIfSealed() } catch { self.extractionFailed(error) }
         let end = self.pendingEnd
         self.queue.asyncAfter(deadline: .now() + 5) {
             if self.pendingEnd != nil && self.pendingEnd == end { self.extractionFailed(RecordingError.invalid("Extraction sealing timed out; recording continues")) }
@@ -347,6 +363,10 @@ final class RollingRecording: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                 buffer.release(selected); extracting = false
                 switch result {
                 case .success(var info):
+                    for (key, value) in extractionTiming { info[key] = value }
+                    if let target = extractionTiming["requestedSourceUs"] as? Int64, let actual = info["sourceLastUs"] as? Int64 {
+                        info["endpointErrorUs"] = actual - target
+                    }
                     info["state"] = "ready"; info["detail"] = "Clip ready; beginning/middle/end frames decoded"; extraction = info
                     extractionHistory.append(info); if extractionHistory.count > 100 { extractionHistory.removeFirst() }
                     extractDone?(nil); extractDone = nil

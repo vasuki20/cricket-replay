@@ -157,6 +157,17 @@ struct RecordingTests {
         let rows = try String(contentsOf: root.appendingPathComponent("clip-frames.csv"), encoding: .utf8).split(separator: "\n").dropFirst().map { $0.split(separator: ",").map(String.init) }
         let clip = AVAssetImageGenerator(asset: AVURLAsset(url: root.appendingPathComponent("latest-clip.mp4")))
         clip.requestedTimeToleranceBefore = .zero; clip.requestedTimeToleranceAfter = .zero
+        let clipURL = root.appendingPathComponent("latest-clip.mp4")
+        let forward = try RecordingClip.inspect(clipURL, index: 100)
+        let next = try RecordingClip.inspect(clipURL, index: 101)
+        let backward = try RecordingClip.inspect(clipURL, index: 100)
+        try require(forward.count == rows.count && forward.timeUs == Int64(rows[100][2])!, "inspection must report actual sample count and timestamp")
+        try require(next.timeUs > forward.timeUs, "forward step must advance recorded timestamp")
+        try require(forward.image.dataProvider!.data! as Data == backward.image.dataProvider!.data! as Data, "backward step must restore same decoded frame")
+        try require(forward.image.dataProvider!.data! as Data != next.image.dataProvider!.data! as Data, "moving fixture must advance to another recorded image")
+        do { _ = try RecordingClip.inspect(clipURL, index: rows.count); throw RecordingError.invalid("Invalid frame index accepted") }
+        catch RecordingError.invalid(let detail) where detail == "Invalid frame index accepted" { throw RecordingError.invalid(detail) }
+        catch {}
         var joins = 0
         for index in 1..<rows.count {
             let delta = Int64(rows[index][1])! - Int64(rows[index - 1][1])!

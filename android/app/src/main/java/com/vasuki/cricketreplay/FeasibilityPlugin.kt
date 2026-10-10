@@ -33,14 +33,37 @@ import org.json.JSONObject
 class FeasibilityPlugin : Plugin() {
     private val recordingPreview by lazy { RecordingPreview(activity, bridge.webView) }
     @PluginMethod fun setRecordingPreview(call: PluginCall) { activity.runOnUiThread { recordingPreview.layout(call) } }
+    private var inspectingFrame = false
+    private val frameWorker = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @PluginMethod fun inspectRecordingFrame(call: PluginCall) { activity.runOnUiThread {
+        val index = call.getInt("index")
+        if (inspectingFrame || player != null || index == null || index !in 0..9999) { call.reject("Close playback and choose an available frame"); return@runOnUiThread }
+        inspectingFrame = true
+        recording.completedClip { file -> frameWorker.execute {
+            try {
+                val result = RecordingFrame.inspect(file ?: error("Extract a recording clip first"), index)
+                activity.runOnUiThread { inspectingFrame = false; call.resolve(JSObject(result.toString())) }
+            } catch (error: Exception) { activity.runOnUiThread { inspectingFrame = false; call.reject(error.message ?: "Frame decode failed") } }
+        } }
+    } }
     private var cameraRecording = false // UI thread owns scanner/generator/camera resource exclusion.
     private val recording by lazy { RollingRecording(context) {
         activity.runOnUiThread { cameraRecording = false; recordingPreview.hide(); activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     } }
+    override fun load() {
+        session.onReview = { endpoint, done -> activity.runOnUiThread {
+            if (player != null || inspectingFrame) done(IllegalStateException("Close frame inspection/playback before a remote review"))
+            else recording.extract(endpoint, done)
+        } }
+    }
+    @PluginMethod fun measureReviewClock(call: PluginCall) { session.measureClock(); call.resolve() }
+    @PluginMethod fun requestTimedReview(call: PluginCall) {
+        session.requestReview(call.getInt("delayMs", 0) ?: 0) { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Review unavailable") }
+    }
     @PluginMethod fun recordingStatus(call: PluginCall) { recording.status { call.resolve(JSObject(it.toString())) } }
     @PluginMethod fun recordingReport(call: PluginCall) { recording.report { call.resolve(JSObject().put("report", it)) } }
     @PluginMethod fun startRecording(call: PluginCall) { activity.runOnUiThread {
-        if (cameraRecording || scanning || player != null || generating) { call.reject("Stop capture, close scanning/playback and finish sample generation first"); return@runOnUiThread }
+        if (cameraRecording || scanning || player != null || generating || inspectingFrame) { call.reject("Stop capture, close scanning/playback and finish sample generation first"); return@runOnUiThread }
         if (getPermissionState("camera") != PermissionState.GRANTED) {
             call.reject("Camera access denied or not requested. Request camera permission, or enable Camera in app settings."); return@runOnUiThread
         }
@@ -64,19 +87,21 @@ class FeasibilityPlugin : Plugin() {
         activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); call.resolve()
     } } }
     @PluginMethod fun extractRecording(call: PluginCall) { activity.runOnUiThread {
-        if (player != null) { call.reject("Close playback before replacing the clip"); return@runOnUiThread }
+        if (player != null || inspectingFrame) { call.reject("Close frame inspection/playback before replacing the clip"); return@runOnUiThread }
         recording.extract { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Cannot extract recent clip") }
     } }
     @PluginMethod fun playRecordingClip(call: PluginCall) {
         recording.completedClip { file -> activity.runOnUiThread {
             if (file == null) { call.reject("No completed recording clip"); return@runOnUiThread }
             if (player != null || activity.isFinishing || activity.isDestroyed) { call.reject("Close playback first"); return@runOnUiThread }
-            try { player = SamplePlayer(activity, file, { error -> if (error == null) call.resolve() else call.reject(error) }, { player = null }) }
+            val rate = (call.getDouble("rate", 1.0) ?: 1.0).toFloat()
+            if (rate !in listOf(1f, 0.5f, 0.25f) || inspectingFrame) { call.reject("Choose 1×, 0.5× or 0.25× and finish inspection first"); return@runOnUiThread }
+            try { player = SamplePlayer(activity, file, { error -> if (error == null) call.resolve() else call.reject(error) }, { player = null }, rate) }
             catch (_: Exception) { player = null; call.reject("Cannot open recording playback") }
         } }
     }
     @PluginMethod fun cleanupRecording(call: PluginCall) { activity.runOnUiThread {
-        if (player != null) { call.reject("Close playback before cleanup"); return@runOnUiThread }
+        if (player != null || inspectingFrame) { call.reject("Close frame inspection/playback before cleanup"); return@runOnUiThread }
         recording.cleanup { error -> if (error == null) call.resolve() else call.reject(error.message ?: "Cannot clean recording") }
     } }
     private val session by lazy { LocalSession(::localAddresses, ::bindWiFi, java.io.File(context.cacheDir, "cricket-transfer-${java.util.UUID.randomUUID()}")) }
@@ -217,7 +242,7 @@ class FeasibilityPlugin : Plugin() {
         activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         player?.dismiss(); session.stop("App backgrounded; foreground and restart/reconnect")
     }
-    override fun handleOnDestroy() { destroyed = true; recording.destroy(); recordingPreview.destroy(); player?.dismiss(); session.destroy(); generator.shutdownNow() }
+    override fun handleOnDestroy() { destroyed = true; recording.destroy(); recordingPreview.destroy(); player?.dismiss(); session.destroy(); generator.shutdownNow(); frameWorker.shutdown() }
     private fun diagnostics(): JSObject = JSObject().apply {
         put("platform", "android")
         put("appVersion", context.packageManager.getPackageInfo(context.packageName, 0).versionName)

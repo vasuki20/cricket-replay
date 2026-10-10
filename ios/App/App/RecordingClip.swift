@@ -2,6 +2,26 @@ import Foundation
 import AVFoundation
 
 enum RecordingClip {
+    static func inspect(_ url: URL, index: Int) throws -> (image: CGImage, timeUs: Int64, count: Int) {
+        let asset = AVURLAsset(url: url)
+        guard let track = asset.tracks(withMediaType: .video).first else { throw RecordingError.invalid("No video track") }
+        let (reader, source) = try reader(asset, track); defer { reader.cancelReading() }
+        var times: [Int64] = []
+        while let sample = source.copyNextSampleBuffer() {
+            if CMSampleBufferGetNumSamples(sample) == 0 { continue }
+            let time = RecordingMedia.microseconds(CMSampleBufferGetPresentationTimeStamp(sample))
+            guard times.count < 10000, times.last == nil || time > times.last! else { throw RecordingError.invalid("Frame order or count unsupported") }
+            times.append(time)
+        }
+        guard reader.status != .failed, times.indices.contains(index) else { throw RecordingError.invalid("Frame index outside recorded clip or reader failed") }
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true; generator.maximumSize = CGSize(width: 640, height: 640)
+        generator.requestedTimeToleranceBefore = .zero; generator.requestedTimeToleranceAfter = .zero
+        var actual = CMTime.invalid
+        let image = try generator.copyCGImage(at: CMTime(value: times[index], timescale: 1_000_000), actualTime: &actual)
+        guard abs(RecordingMedia.microseconds(actual) - times[index]) <= 1 else { throw RecordingError.invalid("Decoder returned a different frame") }
+        return (image, times[index], times.count)
+    }
     // Passthrough remuxing with original PTS intervals; preceding sync sample supplies decoder lead-in.
     static func extract(segments: [RecordingSegment], endUs: Int64, reviewSeconds: Int, output: URL) throws -> [String: Any] {
         let deadline = ProcessInfo.processInfo.systemUptime + 30

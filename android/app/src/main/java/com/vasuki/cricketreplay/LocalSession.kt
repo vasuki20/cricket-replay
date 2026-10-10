@@ -1,5 +1,6 @@
 package com.aadhinitinytales.cricketreplay
 
+import android.os.SystemClock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -28,6 +29,9 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
     @Volatile private var authenticated = false
     private var handshakeTimeout: ScheduledFuture<*>? = null
     private val pending = mutableMapOf<String, Pair<Long, ScheduledFuture<*>>>()
+    private var clockSamples = 0
+    private var bestClock: Triple<Double, Double, Double>? = null
+    var onReview: ((Long, (Exception?) -> Unit) -> Unit)? = null
     private var snapshot = emptySnapshot()
     private val transfer = SampleTransfer(queue, directory).apply {
         onSend = { id, packet ->
@@ -124,7 +128,7 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
             catch (error: Exception) { post { if (socket === peer) failPeer(error.message ?: "Send failed") } }
         } } catch (_: Exception) { failPeer("Too many outgoing messages; reconnect") }
     }
-    private fun signed(type: String, id: String = UUID.randomUUID().toString()) { send(auth!!.signed(type, id)) }
+    private fun signed(type: String, id: String = UUID.randomUUID().toString(), payload: String = "") { send(auth!!.signed(type, id, payload)) }
     private fun handle(frame: JSONObject) {
         try {
             val authentication = checkNotNull(auth)
@@ -147,13 +151,39 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
             when (type) {
                 "ping", "status" -> {
                     snapshot.put("pingsReceived", snapshot.getInt("pingsReceived") + 1)
-                    signed(if (type == "ping") "pong" else "statusReply", id)
+                    val t2 = nowUs()
+                    val body = runCatching { JSONObject(frame.optString("payload")) }.getOrNull()
+                    when {
+                        type == "status" && body?.optString("kind") == "review" -> {
+                            check(role == "camera" && onReview != null) { "Review receiver unavailable" }
+                            val endpoint = body.getLong("peerTapUs"); val token = auth
+                            onReview!!.invoke(endpoint) { error -> post {
+                                if (auth === token) signed("statusReply", id, JSONObject().put("kind", "review").put("ok", error == null)
+                                    .put("detail", error?.message ?: "Requested clip ready on camera").put("peerTapUs", endpoint).toString())
+                            } }
+                        }
+                        type == "status" && body?.optString("kind") == "clock" -> signed("statusReply", id, JSONObject().put("kind", "clock").put("t2", t2).put("t3", nowUs()).toString())
+                        else -> signed(if (type == "ping") "pong" else "statusReply", id)
+                    }
                     publish("connected", "Received authenticated $type; replied")
                 }
                 "pong", "statusReply" -> {
                     val request = pending.remove(id) ?: error("Unexpected response")
                     request.second.cancel(false)
-                    snapshot.put("lastRoundTripMs", (System.nanoTime() - request.first) / 1_000_000.0)
+                    val t4 = nowUs(); val body = runCatching { JSONObject(frame.optString("payload")) }.getOrNull()
+                    if (body?.optString("kind") == "clock") {
+                        val t1 = request.first / 1000.0; val t2 = body.getDouble("t2"); val t3 = body.getDouble("t3")
+                        val network = t4 - t1 - (t3 - t2); require(network >= 0 && t3 >= t2) { "Invalid clock exchange" }
+                        val offset = ((t2 - t1) + (t3 - t4)) / 2; clockSamples++
+                        if (bestClock == null || network / 2 < bestClock!!.second) bestClock = Triple(offset, network / 2, t4)
+                        bestClock?.let { snapshot.put("clock", JSONObject().put("samples", clockSamples).put("offsetUs", it.first).put("uncertaintyUs", it.second).put("measuredAtUs", it.third)) }
+                    } else if (body?.optString("kind") == "review") {
+                        val review = snapshot.optJSONObject("review") ?: JSONObject()
+                        body.keys().forEach { key -> review.put(key, body.get(key)) }
+                        review.put("state", if (body.optBoolean("ok")) "ready" else "failed").put("replyElapsedMs", (t4 - request.first / 1000.0) / 1000)
+                        snapshot.put("review", review)
+                    }
+                    snapshot.put("lastRoundTripMs", (nowUs() - request.first / 1000.0) / 1000.0)
                         .put("repliesReceived", snapshot.getInt("repliesReceived") + 1)
                     publish("connected", "Received authenticated $type")
                 }
@@ -166,9 +196,30 @@ internal class LocalSession(private val addresses: () -> List<String>, private v
         if (!authenticated || pending.size >= 4) { done(false); return@execute }
         val id = UUID.randomUUID().toString()
         val timeout = queue.schedule({ if (pending.containsKey(id)) failPeer("Peer response timed out; reconnect") }, 8, TimeUnit.SECONDS)
-        pending[id] = Pair(System.nanoTime(), timeout); signed(if (status) "status" else "ping", id); done(true)
+        pending[id] = Pair(SystemClock.elapsedRealtimeNanos(), timeout); signed(if (status) "status" else "ping", id, if (status) JSONObject().put("kind", "clock").toString() else ""); done(true)
     } }
+    private fun nowUs() = SystemClock.elapsedRealtimeNanos() / 1000.0
+    fun measureClock() { queue.execute {
+        clockSamples = 0; bestClock = null; snapshot.remove("clock"); val token = auth
+        for (index in 0..7) queue.schedule({ if (authenticated && auth === token) ping(true) {} }, index * 400L, TimeUnit.MILLISECONDS)
+    } }
+    fun requestReview(delayMs: Int, done: (Exception?) -> Unit) {
+        val tap = nowUs()
+        queue.execute {
+            val best = bestClock
+            if (role != "host" || !authenticated || clockSamples < 4 || best == null || tap - best.third >= 30_000_000 || delayMs !in 0..5000 || pending.isNotEmpty()) {
+                done(IllegalStateException("Measure clocks first; wait for replies, then review within 30 seconds")); return@execute
+            }
+            val id = UUID.randomUUID().toString(); val token = auth
+            val timeout = queue.schedule({ if (pending.containsKey(id)) failPeer("Timed review expired; reconnect") }, 45, TimeUnit.SECONDS)
+            pending[id] = Pair((tap * 1000).toLong(), timeout)
+            snapshot.put("review", JSONObject().put("kind", "review").put("state", "requesting").put("tapUs", tap).put("peerTapUs", tap + best.first).put("uncertaintyUs", best.second).put("injectedDelayMs", delayMs))
+            queue.schedule({ if (authenticated && auth === token) signed("status", id, JSONObject().put("kind", "review").put("peerTapUs", (tap + best.first).toLong()).toString()) }, delayMs.toLong(), TimeUnit.MILLISECONDS)
+            done(null)
+        }
+    }
     private fun failPeer(detail: String) {
+        clockSamples = 0; bestClock = null; snapshot.remove("clock"); snapshot.remove("review")
         transfer.cancel(detail)
         handshakeTimeout?.cancel(false); handshakeTimeout = null
         runCatching { socket?.close() }; socket = null; auth = null; authenticated = false

@@ -33,6 +33,7 @@ internal class RollingRecording(private val context: Context, private val captur
     private var session: CameraCaptureSession? = null
     private var codec: MediaCodec? = null
     private var surface: Surface? = null
+    private var extractionTiming = JSONObject()
     private var preview: Surface? = null // UI owns this surface; recorder never releases it.
     private var format: MediaFormat? = null
     private var muxer: MediaMuxer? = null
@@ -305,12 +306,21 @@ internal class RollingRecording(private val context: Context, private val captur
         segmentFile = null; segmentCsv = null
     }
 
-    fun extract(done: (Exception?) -> Unit) { handler.post {
+    fun extract(endpointHostUs: Long? = null, done: (Exception?) -> Unit) { handler.post {
         if (state != "recording" || extracting || pendingEnd != null) { done(IllegalStateException("Record first; only one extraction may run")); return@post }
         if (lastPts - firstPts < config.reviewSeconds * 1_000_000L) { done(IllegalStateException("Wait for ${config.reviewSeconds} seconds of footage")); return@post }
-        pendingEnd = lastPts; pendingDone = done; extracting = true
+        if (endpointHostUs != null && selection.optInt("sensorTimestampSource", -1) != CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) {
+            done(IllegalStateException("Remote review requires a sensor timestamp source tied to elapsed realtime")); return@post
+        }
+        val target = endpointHostUs ?: lastPts
+        val endpoint = minOf(target, lastPts)
+        if (endpoint - firstPts < config.reviewSeconds * 1_000_000L) { done(IllegalStateException("Requested window is not available")); return@post }
+        extractionTiming = JSONObject()
+        if (endpointHostUs != null) extractionTiming.put("requestedHostUs", endpointHostUs).put("requestedSourceUs", target)
+        pendingEnd = endpoint; pendingDone = done; extracting = true
         extraction = JSONObject().put("state", "sealing").put("ready", false).put("detail", "Waiting for next keyframe; capture continues")
-        try { requestSync() } catch (error: Exception) { extractionFailed(error) }
+        if (buffer.segments.any { it.lastUs >= endpoint }) launchExtraction(endpoint)
+        else try { requestSync() } catch (error: Exception) { extractionFailed(error) }
         val end = pendingEnd
         handler.postDelayed({ if (pendingEnd != null && pendingEnd == end) extractionFailed(IllegalStateException("Extraction keyframe timed out; capture continues")) }, 5000)
     } }
@@ -328,6 +338,8 @@ internal class RollingRecording(private val context: Context, private val captur
                 handler.post {
                     buffer.release(selected); extracting = false
                     if (error == null) {
+                        extractionTiming.keys().forEach { key -> result?.put(key, extractionTiming.get(key)) }
+                        if (extractionTiming.has("requestedSourceUs")) result?.put("endpointErrorUs", result!!.getLong("sourceLastUs") - extractionTiming.getLong("requestedSourceUs"))
                         extraction = checkNotNull(result).put("state", "ready").put("detail", "Clip ready; beginning/middle/end frames decoded")
                         extractionHistory.put(JSONObject(extraction.toString())); if (extractionHistory.length() > 100) extractionHistory.remove(0)
                         pendingDone?.invoke(null); pendingDone = null

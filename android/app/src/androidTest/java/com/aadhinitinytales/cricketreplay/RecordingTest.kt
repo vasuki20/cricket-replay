@@ -69,6 +69,16 @@ class RecordingTest {
             assertEquals(4, result.getInt("segments")); assertEquals(0, result.getInt("intervalsOver50ms"))
             assertTrue(result.getDouble("effectiveFps") in 29.99..30.01)
             val rows = File(directory, "clip-frames.csv").readLines().drop(1).map { it.split(',') }
+            val clip = File(directory, "clip.mp4")
+            val forward = RecordingFrame.inspect(clip, 100)
+            val next = RecordingFrame.inspect(clip, 101)
+            val backward = RecordingFrame.inspect(clip, 100)
+            assertEquals(rows.size, forward.getInt("frameCount"))
+            assertEquals(rows[100][2].toLong(), forward.getLong("timestampUs"))
+            assertTrue(next.getLong("timestampUs") > forward.getLong("timestampUs"))
+            assertEquals(forward.getString("pngBase64"), backward.getString("pngBase64"))
+            assertNotEquals(forward.getString("pngBase64"), next.getString("pngBase64"))
+            try { RecordingFrame.inspect(clip, rows.size); fail("Invalid frame index accepted") } catch (_: Exception) {}
             rows.zipWithNext().forEach { (a, b) -> assertTrue("Original 30fps intervals across file joins", b[1].toLong() - a[1].toLong() in 33_332..33_334) }
             val original = MediaMetadataRetriever(); val remuxed = MediaMetadataRetriever()
             try {

@@ -16,7 +16,7 @@ import android.widget.VideoView
 import java.io.File
 
 // Dialog keeps the main Activity foreground while reviewing a completed local file.
-internal class SamplePlayer(activity: Activity, file: File, done: (String?) -> Unit, dismissed: () -> Unit) {
+internal class SamplePlayer(activity: Activity, file: File, done: (String?) -> Unit, dismissed: () -> Unit, rate: Float = 1f) {
     private val dialog = Dialog(activity, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
     private val video = VideoView(activity)
     init {
@@ -28,7 +28,17 @@ internal class SamplePlayer(activity: Activity, file: File, done: (String?) -> U
         layout.addView(close, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
         val timeout = Runnable { if (!settled) { settled = true; done("Playback preparation timed out"); dialog.dismiss() } }
         video.setMediaController(MediaController(activity).apply { setAnchorView(video) })
-        video.setOnPreparedListener { handler.removeCallbacks(timeout); video.start(); if (!settled) { settled = true; done(null) } }
+        video.setOnPreparedListener { media ->
+            handler.removeCallbacks(timeout)
+            try {
+                media.playbackParams = android.media.PlaybackParams().setSpeed(rate).setPitch(1f)
+                video.start()
+                if (!settled) { settled = true; done(null) }
+            } catch (error: Exception) {
+                if (!settled) { settled = true; done("Decoder cannot play at requested speed: ${error.message}") }
+                dialog.dismiss()
+            }
+        }
         video.setOnErrorListener { _, _, _ ->
             handler.removeCallbacks(timeout)
             if (!settled) { settled = true; done("Cannot play received MP4") }
